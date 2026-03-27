@@ -17,6 +17,9 @@ install:
 		echo "ENCRYPTION_KEY=$(shell uuidgen)" >> backend/.env; \
 	fi
 	@echo "Starting..."
+	@if [ -f .git/info/exclude ]; then \
+		echo "/frontend/" > .git/info/exclude; \
+	fi
 	@make up
 
 up:
