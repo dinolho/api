@@ -1,0 +1,13 @@
+*.db-shm
+*.db-wal
+*.db
+*.dbk
+.env
+__pycache__/
+frontend/
+tmp/
+data/
+files/
+/venv
+/data
+/files

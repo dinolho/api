@@ -1,0 +1,53 @@
+services:
+  backend:
+    build:
+      context: ./
+      dockerfile: ./Dockerfile.backend
+    container_name: finances-backend
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env
+    expose:
+      - "5001"
+    volumes:
+      # Persist SQLite databases on the host
+      - ./backend/data:/app/data
+      - ./backend/files:/app/files
+      # Hot-reload: mount source files so changes reflect without rebuild
+      - ./backend/app.py:/app/app.py
+      - ./backend/database.py:/app/database.py
+      - ./backend/auth_db.py:/app/auth_db.py
+      - ./backend/parsers.py:/app/parsers.py
+    environment:
+      - DB_DIRECTORY=/app/data
+      - FILES_DIRECTORY=/app/files
+      - FLASK_ENV=development
+      - FLASK_DEBUG=1
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5001/')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+      
+  frontend:
+    build:
+      context: .
+      dockerfile: ./Dockerfile.frontend
+    container_name: finances-frontend
+    restart: unless-stopped
+    ports:
+      - "5173:5173"
+    volumes:
+      # Hot-reload: mount source so Vite picks up changes
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+      - ./frontend/index.html:/app/index.html
+      # Keep node_modules from container (don't override with host)
+      - /app/node_modules
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      - VITE_API_HOST=backend        # Proxy /api → http://backend:5001
+      - CHOKIDAR_USEPOLLING=true     # Needed for file-watch to work inside Docker
