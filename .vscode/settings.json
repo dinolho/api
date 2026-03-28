@@ -1,0 +1,17 @@
+{
+    "search.useIgnoreFiles": false,
+    "files.exclude": {
+        "backend/__pycache__": true,
+        "backend/venv": true,
+        "backend/files": true,
+        "backend/tmp": true,
+        "backend/data": true,
+        "backend/*.db": true,
+        "backend/*.db-wal": true,
+        "backend/*.db-shm": true,
+        "**/dist/**": true,
+        "**/node_modules/**": true,
+        "*.sock": true,
+        ".git": true,
+    }
+}

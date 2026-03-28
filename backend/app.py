@@ -598,7 +598,7 @@ def index():
 
 # ─── DATABASE MANAGEMENT ─────────────────────────────────────────────────────
 
-def _db_summary(db_path: str) -> dict:
+def _db_summary(id: str, db_path: str) -> dict:
     """Open any .db file temporarily and return a summary dict."""
     import sqlite3 as _sq
     
@@ -607,6 +607,7 @@ def _db_summary(db_path: str) -> dict:
         db_path = os.path.join(db_module.DB_DIRECTORY, db_path)
     
     result = {
+        "id": id,
         'path': db_path,
         'name': os.path.basename(db_path),
         'size': os.path.getsize(db_path) if os.path.exists(db_path) else 0,
@@ -653,7 +654,7 @@ def list_databases():
     # Merge with file summary info
     results = []
     for odb in org_dbs:
-        summary = _db_summary(odb['db_path'])
+        summary = _db_summary(odb['id'], odb['db_path'])
         # Use the name registered in org_databases if it exists
         if odb.get('db_name'):
             summary['name'] = odb['db_name']
@@ -760,7 +761,7 @@ def get_db_configs():
     for d in configs:
         d['storageType'] = 'cloud'
         if d.get('db_path'):
-            summary = _db_summary(d['db_path'])
+            summary = _db_summary(d['id'],d['db_path'])
             d.update(summary)
             d['path'] = d.get('db_path')
         results.append(d)
@@ -1919,8 +1920,8 @@ def import_statement():
         line = t.get('line')
         if uid:
             existing = conn.execute(
-                'SELECT id FROM transactions WHERE external_uid=? AND account_id=?',
-                (uid, account_id)
+                'SELECT id, account_id FROM transactions WHERE external_uid=?',
+                (uid,)
             ).fetchone()
             if existing:
                 duplicate_lines.append(f"{line}({raw_uid} -> {t})")
@@ -2163,9 +2164,13 @@ def process_enc_files():
             line     = t.get('line')
 
             if uid:
+                # Deduplication logic: check if this transaction (same external UID)
+                # already exists in this account. (Cross-account duplicates are potentially allowed
+                # for transfers, but within the same account it's almost always an error)
+                # Note: changed to search ANY account to be more restrictive as per user requirement.
                 dup = conn.execute(
-                    'SELECT id FROM transactions WHERE external_uid=? AND account_id=?',
-                    (uid, account_id)
+                    'SELECT id, account_id FROM transactions WHERE external_uid=?',
+                    (uid,)
                 ).fetchone()
                 if dup:
                     duplicate_lines.append(line)
