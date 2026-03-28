@@ -1338,12 +1338,15 @@ def get_account_reconciliation(account_id):
         acc_id = account['id']
         acc_name = account['name']
         
-        # Balance today
-        cur_bal = conn.execute('SELECT balance FROM accounts WHERE id=?', (acc_id,)).fetchone()
-        current_balance = cur_bal['balance'] if cur_bal else 0.0
+        # Current total balance (from triggers/DB)
+        cur_bal = conn.execute('SELECT total_balance FROM accounts WHERE id=?', (acc_id,)).fetchone()
+        current_total_balance = cur_bal['total_balance'] if cur_bal else 0
         
         txns = conn.execute('SELECT date, amount, type, raw_amount FROM transactions WHERE account_id=?', (acc_id,)).fetchall()
-        
+        txns_by_date = {}
+        for t in txns:
+            txns_by_date.setdefault(t['date'], []).append(t)
+
         ext = conn.execute('''
             SELECT date, external_balance, notes
             FROM daily_reconciliation
@@ -1351,36 +1354,23 @@ def get_account_reconciliation(account_id):
         ''', (acc_id, date_from, date_to)).fetchall()
         ext_map = {r['date']: r for r in ext}
 
-        # ── Build baseline: start from today's balance and "undo" all
-        #    transactions that fall within [date_from, today] to get the
-        #    balance as it was at the START of date_from.
-        #
-        #    raw_amount is already signed:
-        #      income       → +amount  (positive)
-        #      expense      → -amount  (negative)
-        #      transfer_in  → positive
-        #      transfer_out → negative
-        #      transfer     → signed as per CSV
-        #      credit       → 0 effect on bank balance (card, not cash)
-        #
-        #    To "undo" a transaction: subtract its raw_amount from baseline.
-
-        baseline = 0
-        txns_by_date = {}
-
+        # ── Calculate baseline at START of date_from
+        #    To do this, we start from current_total_balance and "undo" all
+        #    relevant transactions that occurred from date_from onwards.
+        baseline = current_total_balance
+        relevant_types = ('income', 'expense', 'transfer_in', 'transfer_out')
+        
         for t in txns:
-            txns_by_date.setdefault(t['date'], []).append(t)
-            if t['date'] >= date_from and t['type'] != 'credit':
+            if t['date'] >= date_from and t['type'] in relevant_types:
                 baseline -= (t['raw_amount'] or 0)
 
-        # ── Walk forward day by day from date_from to date_to,
-        #    applying each day's transactions in chronological order.
+        # ── Walk forward day by day
         curr_walking_balance = baseline
         curr = start_dt
         while curr <= end_dt:
             d_str = curr.strftime('%Y-%m-%d')
             for t in txns_by_date.get(d_str, []):
-                if t['type'] != 'credit':
+                if t['type'] in relevant_types:
                     curr_walking_balance += (t['raw_amount'] or 0)
 
             e = ext_map.get(d_str)
