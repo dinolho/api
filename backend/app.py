@@ -1223,6 +1223,53 @@ def get_accounts():
     conn.close()
     return jsonify([dict(r) for r in rows])
 
+@app.route('/api/accounts/verify-integrity', methods=['POST'])
+def verify_accounts_integrity():
+    conn = db_module.get_db_connection()
+    # Use the logic provided by the user
+    rows = conn.execute('''
+        SELECT 
+            id, 
+            name, 
+            balance, 
+            total_transfers, 
+            total_balance,
+            (SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE account_id = a.id AND type = 'income') as income,
+            (SELECT COALESCE(SUM(amount), 0) FROM transactions WHERE account_id = a.id AND type = 'expense') as expenses,
+            (SELECT COALESCE(SUM(raw_amount), 0) FROM transactions WHERE account_id = a.id AND type IN ('transfer_in', 'transfer_out')) as expected_transfers
+        FROM accounts a
+    ''').fetchall()
+    
+    results = []
+    for r in rows:
+        income = r['income']
+        expenses = r['expenses']
+        expected_balance = income - expenses
+        expected_transfers = r['expected_transfers']
+        expected_total = r['balance'] + expected_transfers
+        
+        results.append({
+            "id": r['id'],
+            "name": r['name'],
+            "actual_balance": r['balance'],
+            "expected_balance": expected_balance,
+            "income": income,
+            "expenses": expenses,
+            "actual_transfers": r['total_transfers'],
+            "expected_transfers": expected_transfers,
+            "actual_total": r['total_balance'],
+            "expected_total": expected_total,
+            "balance_ok": r['balance'] == expected_balance,
+            "transfers_ok": r['total_transfers'] == expected_transfers,
+            "total_ok": r['total_balance'] == expected_total,
+            "overall_ok": (r['balance'] == expected_balance and 
+                           r['total_transfers'] == expected_transfers and 
+                           r['total_balance'] == expected_total)
+        })
+    
+    conn.close()
+    return jsonify(results)
+
 @app.route('/api/accounts', methods=['POST'])
 def create_account():
     data = request.json

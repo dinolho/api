@@ -35,6 +35,8 @@ def init_db():
         name TEXT NOT NULL,
         type TEXT NOT NULL,
         balance INTEGER DEFAULT 0,
+        total_transfers INTEGER DEFAULT 0,
+        total_balance INTEGER DEFAULT 0,
         currency TEXT DEFAULT 'BRL',
         institution TEXT,
         created_at TEXT DEFAULT (datetime('now')),
@@ -437,6 +439,91 @@ def migrate_db():
             END;
         """)
         changes.append(f"+trgs:{table}")
+
+    # ── Accounts Total Balance Migration ─────────────────────────────────────
+    # Add new columns to accounts
+    try:
+        conn.execute("ALTER TABLE accounts ADD COLUMN total_transfers INTEGER DEFAULT 0")
+        changes.append("+accounts.total_transfers")
+    except Exception: pass
+    try:
+        conn.execute("ALTER TABLE accounts ADD COLUMN total_balance INTEGER DEFAULT 0")
+        changes.append("+accounts.total_balance")
+    except Exception: pass
+
+    # Initialize values for existing accounts
+    conn.execute('''
+        UPDATE accounts SET 
+        total_transfers = (
+            SELECT COALESCE(SUM(raw_amount), 0) 
+            FROM transactions 
+            WHERE account_id = accounts.id 
+            AND type IN ('transfer_in', 'transfer_out')
+        )
+    ''')
+    conn.execute('UPDATE accounts SET total_balance = balance + total_transfers')
+    changes.append("init:accounts_totals")
+
+    # ── Triggers for Automated Totals ─────────────────────────────────────────
+    
+    # 1. Trigger to update total_transfers on transaction INSERT
+    conn.execute("DROP TRIGGER IF EXISTS trg_txn_total_transfers_insert")
+    conn.execute("""
+        CREATE TRIGGER trg_txn_total_transfers_insert
+        AFTER INSERT ON transactions
+        FOR EACH ROW
+        WHEN NEW.type IN ('transfer_in', 'transfer_out')
+        BEGIN
+            UPDATE accounts 
+            SET total_transfers = total_transfers + NEW.raw_amount
+            WHERE id = NEW.account_id;
+        END;
+    """)
+
+    # 2. Trigger to update total_transfers on transaction DELETE
+    conn.execute("DROP TRIGGER IF EXISTS trg_txn_total_transfers_delete")
+    conn.execute("""
+        CREATE TRIGGER trg_txn_total_transfers_delete
+        AFTER DELETE ON transactions
+        FOR EACH ROW
+        WHEN OLD.type IN ('transfer_in', 'transfer_out')
+        BEGIN
+            UPDATE accounts 
+            SET total_transfers = total_transfers - OLD.raw_amount
+            WHERE id = OLD.account_id;
+        END;
+    """)
+
+    # 3. Trigger to update total_transfers on transaction UPDATE
+    conn.execute("DROP TRIGGER IF EXISTS trg_txn_total_transfers_update")
+    conn.execute("""
+        CREATE TRIGGER trg_txn_total_transfers_update
+        AFTER UPDATE ON transactions
+        FOR EACH ROW
+        BEGIN
+            -- Subtract OLD if it was a transfer
+            UPDATE accounts 
+            SET total_transfers = total_transfers - OLD.raw_amount
+            WHERE id = OLD.account_id AND OLD.type IN ('transfer_in', 'transfer_out');
+            
+            -- Add NEW if it is a transfer
+            UPDATE accounts 
+            SET total_transfers = total_transfers + NEW.raw_amount
+            WHERE id = NEW.account_id AND NEW.type IN ('transfer_in', 'transfer_out');
+        END;
+    """)
+
+    # 4. Trigger to sync total_balance whenever balance or total_transfers changes
+    conn.execute("DROP TRIGGER IF EXISTS trg_accounts_sync_total_balance")
+    conn.execute("""
+        CREATE TRIGGER trg_accounts_sync_total_balance
+        AFTER UPDATE OF balance, total_transfers ON accounts
+        FOR EACH ROW
+        BEGIN
+            UPDATE accounts SET total_balance = NEW.balance + NEW.total_transfers WHERE id = NEW.id;
+        END;
+    """)
+    changes.append("+trgs:accounts_sync")
 
     conn.commit()
     conn.close()
