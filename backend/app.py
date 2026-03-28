@@ -1319,11 +1319,11 @@ def get_account_reconciliation(account_id):
     if ids_param:
         id_list = [int(i.strip()) for i in ids_param.split(',') if i.strip().isdigit()]
         placeholders = ','.join(['?'] * len(id_list))
-        accounts = conn.execute(f'SELECT id, name FROM accounts WHERE id IN ({placeholders})', id_list).fetchall()
+        accounts = conn.execute(f'SELECT id, name, type FROM accounts WHERE id IN ({placeholders})', id_list).fetchall()
     elif account_id == 0:
-        accounts = conn.execute('SELECT id, name FROM accounts').fetchall()
+        accounts = conn.execute('SELECT id, name, type FROM accounts').fetchall()
     else:
-        accounts = conn.execute('SELECT id, name FROM accounts WHERE id=?', (account_id,)).fetchall()
+        accounts = conn.execute('SELECT id, name, type FROM accounts WHERE id=?', (account_id,)).fetchall()
     
     if not accounts:
         conn.close()
@@ -1337,6 +1337,7 @@ def get_account_reconciliation(account_id):
     for account in accounts:
         acc_id = account['id']
         acc_name = account['name']
+        acc_type = account['type']
         
         # Current total balance (from triggers/DB)
         cur_bal = conn.execute('SELECT total_balance FROM accounts WHERE id=?', (acc_id,)).fetchone()
@@ -1378,6 +1379,7 @@ def get_account_reconciliation(account_id):
                 'date': d_str,
                 'account_id': acc_id,
                 'account_name': acc_name,
+                'account_type': acc_type,
                 'platform_balance': round(curr_walking_balance, 2),
                 'external_balance': e['external_balance'] if e else None,
                 'notes': e['notes'] if e else None
