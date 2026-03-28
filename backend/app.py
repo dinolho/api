@@ -2055,6 +2055,27 @@ def list_file_import_logs():
     return jsonify(rows)
 
 
+@app.route('/api/files/sync', methods=['POST'])
+def sync_files():
+    """
+    Triggers the sync via the HTTP endpoint defined in SYNC_FILE_API.
+    """
+    sync_api = os.environ.get('SYNC_FILE_API')
+    if not sync_api:
+        return jsonify({'error': 'SYNC_FILE_API environment variable not set'}), 500
+
+    if not sync_api.startswith('http'):
+        return jsonify({'error': f'Invalid SYNC_FILE_API format: {sync_api}. Expected http://...'}), 500
+
+    import urllib.request
+    try:
+        with urllib.request.urlopen(sync_api, timeout=60.0) as response:
+            data = response.read().decode('utf-8')
+            return jsonify({'status': 'ok', 'output': data})
+    except Exception as e:
+        return jsonify({'error': f'Sync API error: {str(e)}'}), 500
+
+
 @app.route('/api/files/process', methods=['POST'])
 def process_enc_files():
     """

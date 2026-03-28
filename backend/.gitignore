@@ -11,3 +11,4 @@ files/
 /venv
 /data
 /files
+/sync-files.sock

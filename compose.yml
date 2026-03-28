@@ -23,6 +23,7 @@ services:
       - FILES_DIRECTORY=/app/files
       - FLASK_ENV=development
       - FLASK_DEBUG=1
+      - SYNC_FILE_API=${SYNC_FILE_API:-}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5001/')"]
       interval: 10s
@@ -51,3 +52,4 @@ services:
     environment:
       - VITE_API_HOST=backend        # Proxy /api → http://backend:5001
       - CHOKIDAR_USEPOLLING=true     # Needed for file-watch to work inside Docker
+      
