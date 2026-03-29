@@ -494,7 +494,7 @@ Exemplos:
         # Encontrar conta pelo nome (busca parcial, case-insensitive)
         acc = next(
             (a for a in accounts
-             if account_search.lower() in a["name"].lower()),
+             if account_search.lower() == a["id"]),
             None,
         )
         if not acc:

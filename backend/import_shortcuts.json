@@ -2,21 +2,21 @@
   {
     "label": "Nubank Rasj",
     "pattern": "NU_79868941_",
-    "accountSearch": "Rasj",
+    "accountSearch": "1",
     "bank": "nubank",
     "type": "debit"
   },
   {
     "label": "Nubank Holding",
     "pattern": "NU_1251504794_",
-    "accountSearch": "Holding",
+    "accountSearch": "10",
     "bank": "nubank",
     "type": "debit"
   },
   {
     "label": "Nubank Rasj Extrato Cartao",
     "pattern": "Nubank_",
-    "accountSearch": "Rasj",
+    "accountSearch": "1",
     "bank": "nubank",
     "type": "credit"
   }
