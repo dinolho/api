@@ -634,6 +634,33 @@ def _db_summary(id: str, db_path: str) -> dict:
         result['month_expense'] = conn.execute(
             "SELECT COALESCE(SUM(amount),0) FROM transactions WHERE type='expense' AND date LIKE ?", (ym+'%',)
         ).fetchone()[0]
+
+        # Real Wealth & Net Worth
+        pat_rows = conn.execute('SELECT type, value, purchase_price, depreciation_rate, acquisition_date FROM patrimony_items').fetchall()
+        total_real_assets = 0
+        total_liabilities = 0
+        now = datetime.now()
+        for pr in pat_rows:
+            p_type, p_val, p_purchase, p_rate, p_acq = pr
+            # DB values are stored in cents
+            if p_type == 'asset':
+                if p_purchase and p_acq:
+                    try:
+                        acq_dt = datetime.strptime(p_acq[:10], '%Y-%m-%d')
+                        years = max(0, (now - acq_dt).days / 365.25)
+                        change = p_purchase * (p_rate / 100) * years
+                        real_val = max(0, p_purchase + change)
+                        total_real_assets += real_val
+                    except Exception:
+                        total_real_assets += p_val
+                else:
+                    total_real_assets += p_val
+            else:
+                total_liabilities += p_val
+        
+        result['real_net_worth'] = int(total_real_assets - total_liabilities)
+        result['total_wealth']   = int(result.get('total_balance', 0) + result['real_net_worth'])
+        
         conn.close()
     except Exception as e:
         result['error'] = str(e)
