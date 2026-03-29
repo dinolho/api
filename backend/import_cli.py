@@ -494,12 +494,12 @@ Exemplos:
         # Encontrar conta pelo nome (busca parcial, case-insensitive)
         acc = next(
             (a for a in accounts
-             if account_search.lower() == a["id"]),
+             if str(account_search).lower() == str(a["id"]).lower()),
             None,
         )
         if not acc:
             err(f"Conta de destino não encontrada: '{account_search}'")
-            err(f"  Contas disponíveis: {[a['name'] for a in accounts]}")
+            err(f"  Contas disponíveis: {[a['id'] for a in accounts]}")
             continue
 
         info(f"  {len(matching)} arquivo(s) para conta '{acc['name']}' (id={acc['id']})")
