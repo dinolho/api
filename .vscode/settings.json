@@ -3,7 +3,7 @@
     "files.exclude": {
         "backend/__pycache__": true,
         "backend/venv": true,
-        "backend/files": true,
+        // "backend/files": true,
         "backend/tmp": true,
         // "backend/data": true,
         "backend/*.db": true,
