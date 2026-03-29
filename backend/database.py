@@ -391,6 +391,22 @@ def migrate_db():
         ("entities",     "flags",                "INTEGER DEFAULT 0"),
         ("entities",     "display_name",         "TEXT"),
         ("entities",     "exclude_from_reports", "INTEGER DEFAULT 0"),
+        # ── investments extra fields ──────────────────────────────────────
+        ("investments",  "ticker",               "TEXT"),
+        ("investments",  "quantity",             "REAL DEFAULT 0"),
+        ("investments",  "indexer",              "TEXT"),
+        ("investments",  "rate",                 "REAL DEFAULT 0"),
+        ("investments",  "maturity_date",        "TEXT"),
+        ("investments",  "application_date",     "TEXT"),
+        ("investments",  "redemption_term",      "TEXT"),
+        ("investments",  "gross_value",          "INTEGER DEFAULT 0"),
+        ("investments",  "net_value",            "INTEGER DEFAULT 0"),
+        ("investments",  "tax",                  "INTEGER DEFAULT 0"),
+        ("investments",  "quota_value",          "INTEGER DEFAULT 0"),
+        ("investments",  "quota_date",           "TEXT"),
+        ("investments",  "notes",                "TEXT"),
+        ("investments",  "institution",          "TEXT"),
+        ("investments",  "applied",              "INTEGER DEFAULT 0"),  # valor aplicado / principal
     ]
     
     

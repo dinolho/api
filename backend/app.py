@@ -1726,35 +1726,86 @@ def link_ref_transaction(id):
 
 # ─── INVESTMENTS ──────────────────────────────────────────────────────────────
 
+def _inv_row_to_dict(r):
+    """Convert an investment row to a dict with all extra fields."""
+    d = dict(r)
+    return d
+
 @app.route('/api/investments', methods=['GET'])
 def get_investments():
     conn = get_db_connection()
-    rows = conn.execute('SELECT * FROM investments').fetchall()
+    rows = conn.execute('SELECT * FROM investments ORDER BY date DESC').fetchall()
     conn.close()
-    return jsonify([dict(r) for r in rows])
+    return jsonify([_inv_row_to_dict(r) for r in rows])
 
 @app.route('/api/investments', methods=['POST'])
 def create_investment():
-    data = request.json
+    data = request.json or {}
     conn = get_db_connection()
-    amount = float(data.get('amount', 0))
-    pp = int(round(float(data.get('purchase_price', 0))))
-    cp = int(round(float(data.get('current_price', pp))))
-    conn.execute('INSERT INTO investments (account_id, name, type, amount, purchase_price, current_price, date) VALUES (?,?,?,?,?,?,?)',
-                 (data.get('account_id'), data['name'], data['type'], amount*100, pp, cp, data['date']))
+    # Core price fields stored in centavos
+    purchase_price = int(round(float(data.get('purchase_price', 0)) * 100))
+    current_price  = int(round(float(data.get('current_price', 0)) * 100)) or purchase_price
+    gross_value    = int(round(float(data.get('gross_value', 0)) * 100))
+    net_value      = int(round(float(data.get('net_value', 0)) * 100))
+    tax            = int(round(float(data.get('tax', 0)) * 100))
+    quota_value    = int(round(float(data.get('quota_value', 0)) * 100))
+    applied        = int(round(float(data.get('applied', 0)) * 100))
+    quantity       = float(data.get('quantity', 0))
+    amount         = float(data.get('amount', quantity or 1))  # legacy compat
+
+    conn.execute('''
+        INSERT INTO investments
+            (account_id, name, type, amount, purchase_price, current_price, date,
+             ticker, quantity, indexer, rate, maturity_date, application_date,
+             redemption_term, gross_value, net_value, tax, quota_value, quota_date,
+             notes, institution, applied)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+    ''', (
+        data.get('account_id'), data.get('name', ''), data.get('type', 'fixed'),
+        amount, purchase_price, current_price,
+        data.get('date', ''), data.get('ticker', ''), quantity,
+        data.get('indexer', ''), float(data.get('rate', 0)),
+        data.get('maturity_date', ''), data.get('application_date', ''),
+        data.get('redemption_term', ''),
+        gross_value, net_value, tax, quota_value, data.get('quota_date', ''),
+        data.get('notes', ''), data.get('institution', ''), applied
+    ))
     conn.commit()
+    last = dict(conn.execute('SELECT * FROM investments ORDER BY id DESC LIMIT 1').fetchone())
     conn.close()
-    return jsonify({'status': 'success'}), 201
+    return jsonify(last), 201
 
 @app.route('/api/investments/<int:id>', methods=['PUT'])
 def update_investment(id):
-    data = request.json
+    data = request.json or {}
     conn = get_db_connection()
-    amount = float(data.get('amount', 0))
-    pp = int(round(float(data.get('purchase_price', 0))))
-    cp = int(round(float(data.get('current_price', pp))))
-    conn.execute('UPDATE investments SET account_id=?, name=?, type=?, amount=?, purchase_price=?, current_price=?, date=? WHERE id=?',
-                 (data.get('account_id'), data['name'], data['type'], amount, pp, cp, data['date'], id))
+    purchase_price = int(round(float(data.get('purchase_price', 0)) * 100))
+    current_price  = int(round(float(data.get('current_price', 0)) * 100)) or purchase_price
+    gross_value    = int(round(float(data.get('gross_value', 0)) * 100))
+    net_value      = int(round(float(data.get('net_value', 0)) * 100))
+    tax            = int(round(float(data.get('tax', 0)) * 100))
+    quota_value    = int(round(float(data.get('quota_value', 0)) * 100))
+    applied        = int(round(float(data.get('applied', 0)) * 100))
+    quantity       = float(data.get('quantity', 0))
+    amount         = float(data.get('amount', quantity or 1))
+
+    conn.execute('''
+        UPDATE investments SET
+            account_id=?, name=?, type=?, amount=?, purchase_price=?, current_price=?,
+            date=?, ticker=?, quantity=?, indexer=?, rate=?, maturity_date=?,
+            application_date=?, redemption_term=?, gross_value=?, net_value=?, tax=?,
+            quota_value=?, quota_date=?, notes=?, institution=?, applied=?
+        WHERE id=?
+    ''', (
+        data.get('account_id'), data.get('name', ''), data.get('type', 'fixed'),
+        amount, purchase_price, current_price,
+        data.get('date', ''), data.get('ticker', ''), quantity,
+        data.get('indexer', ''), float(data.get('rate', 0)),
+        data.get('maturity_date', ''), data.get('application_date', ''),
+        data.get('redemption_term', ''),
+        gross_value, net_value, tax, quota_value, data.get('quota_date', ''),
+        data.get('notes', ''), data.get('institution', ''), applied, id
+    ))
     conn.commit()
     conn.close()
     return jsonify({'status': 'success'})
@@ -1766,6 +1817,279 @@ def delete_investment(id):
     conn.commit()
     conn.close()
     return jsonify({'status': 'success'})
+
+# ── Market Data ────────────────────────────────────────────────────────────────
+
+@app.route('/api/investments/market-data', methods=['GET'])
+def get_market_data():
+    """Fetch live market indicators from public APIs (CDI, SELIC, IPCA, stocks, crypto)."""
+    import urllib.request, json as _json
+    result = {
+        'cdi': None, 'selic': None, 'ipca': None,
+        'usd': None, 'eur': None,
+        'stocks': {}, 'crypto': {},
+        'errors': []
+    }
+
+    def _fetch(url, timeout=5):
+        try:
+            req = urllib.request.Request(url, headers={'User-Agent': 'FinancePro/1.0'})
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return _json.loads(resp.read().decode())
+        except Exception as e:
+            return None
+
+    # ── BCB time series: CDI (11) SELIC (432) IPCA (433) ──────────────────
+    _bcb_ids = {'cdi': 11, 'selic': 432, 'ipca': 433}
+    for key, sid in _bcb_ids.items():
+        data = _fetch(f'https://api.bcb.gov.br/dados/serie/bcdata.sgs.{sid}/dados/ultimos/1?formato=json')
+        if data and isinstance(data, list) and data:
+            try:
+                result[key] = float(data[-1]['valor'].replace(',', '.'))
+            except Exception:
+                result['errors'].append(f'bcb_{key}')
+        else:
+            result['errors'].append(f'bcb_{key}_fetch')
+
+    # ── AwesomeAPI: USD/BRL EUR/BRL ────────────────────────────────────────
+    fx = _fetch('https://economia.awesomeapi.com.br/json/last/USD-BRL,EUR-BRL')
+    if fx:
+        try: result['usd'] = float(fx['USDBRL']['bid'])
+        except Exception: result['errors'].append('fx_usd')
+        try: result['eur'] = float(fx['EURBRL']['bid'])
+        except Exception: result['errors'].append('fx_eur')
+    else:
+        result['errors'].append('fx_fetch')
+
+    # ── Tickers from DB ────────────────────────────────────────────────────
+    conn = get_db_connection()
+    tickers = [r[0] for r in conn.execute(
+        "SELECT DISTINCT ticker FROM investments WHERE ticker IS NOT NULL AND ticker != '' AND type IN ('stock','reit')"
+    ).fetchall()]
+    cryptos = [r[0] for r in conn.execute(
+        "SELECT DISTINCT ticker FROM investments WHERE type='crypto' AND ticker IS NOT NULL AND ticker != ''"
+    ).fetchall()]
+    conn.close()
+
+    # ── BRAPI: stocks/FIIs ─────────────────────────────────────────────────
+    if tickers:
+        ticker_str = ','.join(tickers[:20])
+        brapi = _fetch(f'https://brapi.dev/api/quote/{ticker_str}')
+        if brapi and brapi.get('results'):
+            for item in brapi['results']:
+                result['stocks'][item['symbol']] = {
+                    'price': item.get('regularMarketPrice'),
+                    'change_pct': item.get('regularMarketChangePercent'),
+                    'name': item.get('shortName') or item.get('longName'),
+                }
+        else:
+            result['errors'].append('brapi_stocks')
+
+    # ── CoinGecko: crypto ──────────────────────────────────────────────────
+    _cg_map = {
+        'BTC': 'bitcoin', 'ETH': 'ethereum', 'SOL': 'solana',
+        'BNB': 'binancecoin', 'ADA': 'cardano', 'DOT': 'polkadot',
+        'MATIC': 'matic-network', 'LINK': 'chainlink', 'AVAX': 'avalanche-2',
+        'XRP': 'ripple', 'DOGE': 'dogecoin', 'LTC': 'litecoin',
+    }
+    if cryptos:
+        ids = ','.join(_cg_map.get(c.upper(), c.lower()) for c in cryptos if c)
+        if ids:
+            cg = _fetch(f'https://api.coingecko.com/api/v3/simple/price?ids={ids}&vs_currencies=brl&include_24hr_change=true')
+            if cg:
+                for sym in cryptos:
+                    cg_id = _cg_map.get(sym.upper(), sym.lower())
+                    if cg_id in cg:
+                        result['crypto'][sym.upper()] = {
+                            'price_brl': cg[cg_id].get('brl'),
+                            'change_24h': cg[cg_id].get('brl_24h_change'),
+                        }
+            else:
+                result['errors'].append('coingecko')
+
+    return jsonify(result)
+
+# ── Insights ───────────────────────────────────────────────────────────────────
+
+@app.route('/api/investments/insights', methods=['GET'])
+def get_investment_insights():
+    """Generate per-investment insights and recommendations."""
+    from datetime import date as _date
+
+    conn = get_db_connection()
+    rows = conn.execute('SELECT * FROM investments').fetchall()
+    conn.close()
+
+    today = _date.today()
+    insights = []
+
+    for row in rows:
+        inv = dict(row)
+        inv_id = inv['id']
+        inv_type = inv.get('type', '')
+
+        tips = []
+        score = 0  # positive = buy more, negative = sell/redeem
+
+        # ── Maturity alerts ────────────────────────────────────────────────
+        mat = inv.get('maturity_date')
+        if mat:
+            try:
+                mat_dt = datetime.strptime(mat[:10], '%Y-%m-%d').date()
+                days_left = (mat_dt - today).days
+                if days_left < 0:
+                    tips.append({'type': 'danger', 'msg': 'Investimento vencido! Verifique o resgate.'})
+                elif days_left <= 30:
+                    tips.append({'type': 'warning', 'msg': f'Vence em {days_left} dias — planeje o próximo destino.'})
+                elif days_left <= 90:
+                    tips.append({'type': 'info', 'msg': f'Vence em {days_left} dias.'})
+            except Exception:
+                pass
+
+        # ── Profitability vs CDI ───────────────────────────────────────────
+        pp = inv.get('purchase_price', 0) or 0
+        cp = inv.get('current_price', 0) or pp
+        nv = inv.get('net_value', 0) or 0
+        gv = inv.get('gross_value', 0) or 0
+        app_date = inv.get('application_date') or inv.get('date')
+
+        if pp and cp and app_date:
+            try:
+                app_dt = datetime.strptime(app_date[:10], '%Y-%m-%d').date()
+                days_held = max(1, (today - app_dt).days)
+                years_held = days_held / 365.25
+
+                # Total gain from stored net/gross
+                if nv and gv and gv > 0:
+                    total_return_pct = ((nv - pp * (inv.get('quantity', 1) or 1)) / (pp * (inv.get('quantity', 1) or 1))) * 100 if pp else 0
+                elif pp and cp:
+                    total_return_pct = ((cp - pp) / pp) * 100
+                else:
+                    total_return_pct = 0
+
+                ann_return = ((1 + total_return_pct / 100) ** (1 / max(years_held, 0.08)) - 1) * 100
+
+                # CDI approx 10.65% a.a.
+                CDI_ANNUAL = 10.65
+                if inv_type in ('fixed', 'cri_cra', 'tesouro', 'fund') and ann_return < CDI_ANNUAL * 0.9:
+                    tips.append({'type': 'warning', 'msg': f'Rentabilidade ({ann_return:.1f}% a.a.) abaixo do CDI ({CDI_ANNUAL}% a.a.).'})
+                    score -= 1
+                elif inv_type in ('fixed', 'cri_cra', 'tesouro') and ann_return > CDI_ANNUAL * 1.1:
+                    tips.append({'type': 'success', 'msg': f'Ótima rentabilidade: {ann_return:.1f}% a.a. vs CDI {CDI_ANNUAL}%.'})
+                    score += 1
+            except Exception:
+                pass
+
+        # ── Indexer tips ───────────────────────────────────────────────────
+        indexer = (inv.get('indexer') or '').upper()
+        rate = inv.get('rate', 0) or 0
+        if 'CDI' in indexer:
+            if rate >= 100:
+                tips.append({'type': 'success', 'msg': f'{rate:.0f}% do CDI — acima da referência.'})
+                score += 1
+            elif rate >= 90:
+                tips.append({'type': 'info', 'msg': f'{rate:.0f}% do CDI — dentro do esperado.'})
+            else:
+                tips.append({'type': 'warning', 'msg': f'{rate:.0f}% do CDI — abaixo da referência.'})
+                score -= 1
+        elif 'IPCA' in indexer and rate > 0:
+            tips.append({'type': 'info', 'msg': f'IPCA + {rate:.2f}% a.a. — proteção contra inflação.'})
+            score += 1
+
+        # ── Recommendation ─────────────────────────────────────────────────
+        if score >= 2:
+            rec = {'label': 'Aportar mais', 'color': 'success', 'icon': 'trending-up'}
+        elif score <= -2:
+            rec = {'label': 'Considerar resgate', 'color': 'destructive', 'icon': 'trending-down'}
+        else:
+            rec = {'label': 'Manter posição', 'color': 'muted', 'icon': 'minus'}
+
+        insights.append({
+            'id': inv_id,
+            'name': inv.get('name'),
+            'type': inv_type,
+            'tips': tips,
+            'recommendation': rec,
+            'score': score,
+        })
+
+    return jsonify(insights)
+
+# ── Income Forecast ────────────────────────────────────────────────────────────
+
+@app.route('/api/investments/income-forecast', methods=['GET'])
+def get_income_forecast():
+    """Project income for each investment at 1, 3, 6, 12, 24 months."""
+    conn = get_db_connection()
+    rows = conn.execute('SELECT * FROM investments').fetchall()
+    conn.close()
+
+    # Use approximate market rates
+    RATES = {'CDI': 10.65, 'SELIC': 10.75, 'IPCA': 5.06}
+
+    forecast = []
+    periods = [1, 3, 6, 12, 24]  # months
+
+    for row in rows:
+        inv = dict(row)
+        inv_type = inv.get('type', '')
+
+        # Determine principal in BRL (centavos stored)
+        net_v = inv.get('net_value', 0) or 0
+        gross_v = inv.get('gross_value', 0) or 0
+        pp = inv.get('purchase_price', 0) or 0
+        qty = inv.get('quantity', 1) or 1
+        applied = net_v or (pp * qty)  # centavos
+
+        indexer = (inv.get('indexer') or '').upper()
+        rate_pct = float(inv.get('rate', 0) or 0)
+
+        # Annual rate calculation
+        if 'CDI' in indexer:
+            base = RATES['CDI']
+            annual_rate = base * (rate_pct / 100)
+        elif 'IPCA' in indexer:
+            annual_rate = RATES['IPCA'] + rate_pct
+        elif 'SELIC' in indexer:
+            base = RATES['SELIC']
+            annual_rate = base * (rate_pct / 100) if rate_pct > 0 else base
+        elif 'PRÉ' in indexer or 'PRE' in indexer or 'PREFIXADO' in indexer:
+            annual_rate = rate_pct
+        elif inv_type == 'stock':
+            annual_rate = 12.0  # expected equity return ~12% a.a.
+        elif inv_type == 'reit':
+            annual_rate = 9.0   # FII yield ~9% a.a.
+        elif inv_type == 'crypto':
+            annual_rate = 0     # too volatile to forecast
+        else:
+            annual_rate = rate_pct if rate_pct > 0 else RATES['CDI']
+
+        projections = {}
+        for m in periods:
+            years = m / 12
+            gain_pct = ((1 + annual_rate / 100) ** years - 1) * 100
+            projected_gain = int(applied * gain_pct / 100)
+            projected_total = applied + projected_gain
+            projections[str(m)] = {
+                'gain_pct': round(gain_pct, 4),
+                'gain': projected_gain,
+                'total': projected_total,
+            }
+
+        forecast.append({
+            'id': inv['id'],
+            'name': inv['name'],
+            'type': inv_type,
+            'applied': applied,
+            'annual_rate': annual_rate,
+            'indexer': indexer,
+            'rate_pct': rate_pct,
+            'projections': projections,
+        })
+
+    return jsonify(forecast)
+
+
 
 # ─── ENTITIES ────────────────────────────────────────────────────────────────
 
