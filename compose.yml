@@ -14,20 +14,12 @@ services:
       - ./backend/data:/app/data
       - ./backend/files:/app/files
       # Hot-reload: mount source files so changes reflect without rebuild
-      - ./backend/app.py:/app/app.py
-      - ./backend/database.py:/app/database.py
-      - ./backend/auth_db.py:/app/auth_db.py
-      - ./backend/parsers.py:/app/parsers.py
+      - ./backend/src:/app/src
     environment:
       - DB_DIRECTORY=/app/data
       - FILES_DIRECTORY=/app/files
       - FLASK_ENV=development
       - FLASK_DEBUG=1
-      - SYNC_FILE_API=${SYNC_FILE_API:-}
-      - AUTH_DB_TYPE=postgres
-      - AUTH_DB_DSN=postgresql://finances:password@postgres:5432/finances_auth
-      - AUDIT_DB_TYPE=postgres
-      - AUDIT_DB_DSN=postgresql://finances:password@postgres:5432/finances_auth
     depends_on:
       postgres:
         condition: service_started
@@ -64,12 +56,12 @@ services:
     image: postgres:15-alpine
     container_name: finances-postgres
     restart: unless-stopped
-    environment:
-      POSTGRES_USER: finances
-      POSTGRES_PASSWORD: password
-      POSTGRES_DB: finances_auth
     ports:
-      - "5432:5432"
+      - "5433:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-finances}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRES_DB: ${POSTGRES_DB:-finances_auth}
     volumes:
       - pgdata:/var/lib/postgresql/data
 

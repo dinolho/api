@@ -5,4 +5,10 @@ pyotp==2.9.0
 openai==1.12.0
 Werkzeug==3.0.1
 cryptography==42.0.5
-dotenv==0.9.9psycopg[binary]==3.1.18
+python-dotenv==1.0.1
+psycopg[binary]
+alembic
+SQLAlchemy
+clickhouse-sqlalchemy
+pymysql
+psycopg2-binary

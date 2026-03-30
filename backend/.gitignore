@@ -3,12 +3,10 @@
 *.db
 *.dbk
 .env
-__pycache__/
-frontend/
-tmp/
-data/
-files/
-/venv
+__pycache__
+/frontend
+/tmp
 /data
 /files
+/venv
 /sync-files.sock

@@ -1,0 +1,9 @@
+backend/data
+backend/files
+backend/.env
+backend/venv
+backend/*.bk
+backend/*.db
+frontend/node_modules
+.git
+.env

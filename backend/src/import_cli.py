@@ -34,7 +34,7 @@ from pathlib import Path
 # ── dotenv ────────────────────────────────────────────────────────────────────
 try:
     from dotenv import load_dotenv
-    _env = Path(__file__).parent / ".env"
+    _env = Path(__file__).parent.parent / ".env"
     load_dotenv(_env)
 except ImportError:
     pass
@@ -43,10 +43,10 @@ except ImportError:
 _HERE = Path(__file__).parent.resolve()
 
 DB_DIRECTORY = Path(
-    os.environ.get("DB_DIRECTORY", _HERE / "data")
+    os.environ.get("DB_DIRECTORY", _HERE.parent / "data")
 )
 FILES_DIRECTORY = Path(
-    os.environ.get("FILES_DIRECTORY", _HERE / "files")
+    os.environ.get("FILES_DIRECTORY", _HERE.parent / "files")
 )
 ENCRYPTION_KEY: str = os.environ.get("ENCRYPTION_KEY", "")
 
@@ -371,7 +371,7 @@ Exemplos:
     )
     parser.add_argument(
         "--shortcuts-file",
-        default=str(_HERE / "import_shortcuts.json"),
+        default=str(_HERE.parent / "import_shortcuts.json"),
         help="Caminho para o JSON de atalhos (padrão: import_shortcuts.json).",
     )
     parser.add_argument(

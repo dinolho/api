@@ -5,7 +5,7 @@ Separate from financial DBs. Stored as auth.db at the app root.
 import sqlite3, os, secrets
 from werkzeug.security import generate_password_hash, check_password_hash
 
-AUTH_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data/auth.db')
+AUTH_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data/auth.db')
 
 AUTH_DB_TYPE = os.environ.get('AUTH_DB_TYPE', 'sqlite')
 AUTH_DB_DSN = os.environ.get('AUTH_DB_DSN', AUTH_DB_PATH)

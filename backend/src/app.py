@@ -12,8 +12,7 @@ import auth_db
 from dotenv import load_dotenv
 import re as _re
 
-if os.environ.get('ENCRYPTION_KEY') is None:
-    load_dotenv() 
+load_dotenv() 
 
 print(f"ENVIRONMENT: {os.environ.get('ENVIRONMENT')}")
 
@@ -30,7 +29,7 @@ auth_db.init_auth_db()
 import db_adapter
 
 _AUDIT_DB_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     'data', 'audit.db'
 )
 _AUDIT_DB_TYPE = os.environ.get('AUDIT_DB_TYPE', 'sqlite')
@@ -728,7 +727,7 @@ APP_SECRET = os.environ.get('APP_SECRET', secrets.token_hex(32))
 # ─── FILES DIRECTORY ─────────────────────────────────────────────────────────
 FILES_DIRECTORY = os.environ.get(
     'FILES_DIRECTORY',
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), 'files')
+    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'files')
 )
 os.makedirs(FILES_DIRECTORY, exist_ok=True)
 
@@ -2164,7 +2163,7 @@ def delete_investment(id):
 
 # ── Market Data DB (separate persistent store) ────────────────────────────────
 _MARKET_DB_PATH = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     'data', 'market-data.db'
 )
 _MARKET_DB_TYPE = os.environ.get('MARKET_DB_TYPE', 'sqlite')
