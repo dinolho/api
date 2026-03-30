@@ -23,6 +23,291 @@ CORS(app)
 # ─── Auth DB init ─────────────────────────────────────────────
 auth_db.init_auth_db()
 
+# ═══════════════════════════════════════════════════════════════
+# ──  AUDITORIA & HISTÓRICO DE ALTERAÇÕES  ───────────────────
+# ═══════════════════════════════════════════════════════════════
+
+_AUDIT_DB_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    'data', 'audit.db'
+)
+
+def _get_audit_db():
+    """Return an open connection to the dedicated audit SQLite database."""
+    os.makedirs(os.path.dirname(_AUDIT_DB_PATH), exist_ok=True)
+    conn = sqlite3.connect(_AUDIT_DB_PATH, timeout=5.0)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+
+    # ── Audit log: one row per event ──────────────────────────────────────────
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            occurred_at TEXT    NOT NULL DEFAULT (datetime('now', 'utc')),
+            action      TEXT    NOT NULL,          -- create | update | delete | login | logout | ...
+            table_name  TEXT,                      -- affected DB table (NULL for system events)
+            record_id   INTEGER,                   -- PK of the affected row
+            user_id     TEXT,
+            user_email  TEXT,
+            user_name   TEXT,
+            ip          TEXT,
+            description TEXT,                      -- human-readable summary
+            old_data    TEXT,                      -- JSON snapshot before
+            new_data    TEXT,                      -- JSON snapshot after
+            extra       TEXT                       -- any extra JSON metadata
+        )
+    ''')
+
+    # ── Field-level change history ────────────────────────────────────────────
+    conn.execute('''
+        CREATE TABLE IF NOT EXISTS change_history (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            occurred_at TEXT    NOT NULL DEFAULT (datetime('now', 'utc')),
+            table_name  TEXT    NOT NULL,
+            record_id   INTEGER NOT NULL,
+            field       TEXT    NOT NULL,
+            old_value   TEXT,
+            new_value   TEXT,
+            user_id     TEXT,
+            user_email  TEXT,
+            user_name   TEXT,
+            audit_log_id INTEGER          -- FK → audit_log.id for grouping
+        )
+    ''')
+
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_al_action   ON audit_log(action)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_al_table    ON audit_log(table_name)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_al_user     ON audit_log(user_id)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_al_date     ON audit_log(occurred_at)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_ch_table_id ON change_history(table_name, record_id)')
+    conn.execute('CREATE INDEX IF NOT EXISTS idx_ch_date     ON change_history(occurred_at)')
+    conn.commit()
+    return conn
+
+
+def _audit_user():
+    """Return (user_id, user_email, user_name, ip) for the current request."""
+    try:
+        u = request.current_user
+        return u.get('id', ''), u.get('email', ''), u.get('name', ''), request.remote_addr or ''
+    except Exception:
+        return '', '', '', request.remote_addr or ''
+
+
+def audit_log(action: str, table_name: str = None, record_id: int = None,
+              old_data: dict = None, new_data: dict = None,
+              description: str = None, extra: dict = None) -> int:
+    """
+    Write one row to audit_log.
+    Returns the new audit_log.id so callers can group change_history rows.
+    """
+    uid, email, name, ip = _audit_user()
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        conn = _get_audit_db()
+        cur = conn.execute(
+            '''INSERT INTO audit_log
+               (occurred_at, action, table_name, record_id,
+                user_id, user_email, user_name, ip,
+                description, old_data, new_data, extra)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)''',
+            (now, action, table_name, record_id,
+             uid, email, name, ip,
+             description,
+             json.dumps(old_data, default=str)  if old_data  else None,
+             json.dumps(new_data, default=str)  if new_data  else None,
+             json.dumps(extra,    default=str)  if extra     else None)
+        )
+        lid = cur.lastrowid
+        conn.commit()
+        conn.close()
+        return lid
+    except Exception:
+        return -1
+
+
+# Fields to skip when diffing (internal/timestamps/irrelevant)
+_SKIP_DIFF = {'created_at', 'updated_at', 'password_hash', 'totp_secret'}
+
+
+def record_changes(table_name: str, record_id: int,
+                   old: dict, new: dict,
+                   audit_log_id: int = None):
+    """
+    Compare old vs new dicts and write one change_history row per changed field.
+    """
+    uid, email, name, _ = _audit_user()
+    now = datetime.now(timezone.utc).isoformat()
+    rows = []
+    all_keys = set(old or {}) | set(new or {})
+    for field in all_keys:
+        if field in _SKIP_DIFF:
+            continue
+        oval = (old or {}).get(field)
+        nval = (new or {}).get(field)
+        if str(oval) != str(nval):
+            rows.append((now, table_name, record_id, field,
+                         str(oval) if oval is not None else None,
+                         str(nval) if nval is not None else None,
+                         uid, email, name, audit_log_id))
+    if not rows:
+        return
+    try:
+        conn = _get_audit_db()
+        conn.executemany(
+            '''INSERT INTO change_history
+               (occurred_at, table_name, record_id, field,
+                old_value, new_value, user_id, user_email, user_name, audit_log_id)
+               VALUES (?,?,?,?,?,?,?,?,?,?)''',
+            rows
+        )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+
+# ── Audit query endpoints ──────────────────────────────────────────────────────
+
+@app.route('/api/audit/logs', methods=['GET'])
+def get_audit_logs():
+    """Paginated audit log with filters."""
+    action    = request.args.get('action', '')
+    table     = request.args.get('table', '')
+    user_id   = request.args.get('user_id', '')
+    date_from = request.args.get('date_from', '')
+    date_to   = request.args.get('date_to', '')
+    search    = request.args.get('search', '')
+    limit     = min(int(request.args.get('limit', 100)), 500)
+    offset    = int(request.args.get('offset', 0))
+
+    try:
+        conn = _get_audit_db()
+    except Exception as e:
+        return jsonify({'error': str(e), 'total': 0, 'items': []}), 500
+
+    where, params = [], []
+    if action:
+        where.append("action=?"); params.append(action)
+    if table:
+        where.append("table_name=?"); params.append(table)
+    if user_id:
+        where.append("user_id=?"); params.append(user_id)
+    if date_from:
+        where.append("occurred_at >= ?"); params.append(date_from)
+    if date_to:
+        where.append("occurred_at <= ?"); params.append(date_to + 'T23:59:59')
+    if search:
+        where.append("(description LIKE ? OR user_email LIKE ? OR table_name LIKE ?)")
+        params += [f'%{search}%', f'%{search}%', f'%{search}%']
+
+    clause = ('WHERE ' + ' AND '.join(where)) if where else ''
+    total  = conn.execute(f"SELECT COUNT(*) FROM audit_log {clause}", params).fetchone()[0]
+    rows   = conn.execute(
+        f"SELECT * FROM audit_log {clause} ORDER BY id DESC LIMIT ? OFFSET ?",
+        params + [limit, offset]
+    ).fetchall()
+    conn.close()
+    return jsonify({'total': total, 'items': [dict(r) for r in rows]})
+
+
+@app.route('/api/audit/changes', methods=['GET'])
+def get_change_history():
+    """Paginated field-level change history with filters."""
+    table     = request.args.get('table', '')
+    record_id = request.args.get('record_id', '')
+    field     = request.args.get('field', '')
+    user_id   = request.args.get('user_id', '')
+    date_from = request.args.get('date_from', '')
+    date_to   = request.args.get('date_to', '')
+    limit     = min(int(request.args.get('limit', 200)), 1000)
+    offset    = int(request.args.get('offset', 0))
+
+    try:
+        conn = _get_audit_db()
+    except Exception as e:
+        return jsonify({'error': str(e), 'total': 0, 'items': []}), 500
+
+    where, params = [], []
+    if table:
+        where.append("table_name=?"); params.append(table)
+    if record_id:
+        where.append("record_id=?"); params.append(int(record_id))
+    if field:
+        where.append("field=?"); params.append(field)
+    if user_id:
+        where.append("user_id=?"); params.append(user_id)
+    if date_from:
+        where.append("occurred_at >= ?"); params.append(date_from)
+    if date_to:
+        where.append("occurred_at <= ?"); params.append(date_to + 'T23:59:59')
+
+    clause = ('WHERE ' + ' AND '.join(where)) if where else ''
+    total  = conn.execute(f"SELECT COUNT(*) FROM change_history {clause}", params).fetchone()[0]
+    rows   = conn.execute(
+        f"SELECT * FROM change_history {clause} ORDER BY id DESC LIMIT ? OFFSET ?",
+        params + [limit, offset]
+    ).fetchall()
+    conn.close()
+    return jsonify({'total': total, 'items': [dict(r) for r in rows]})
+
+
+@app.route('/api/audit/stats', methods=['GET'])
+def get_audit_stats():
+    """Summary statistics for the audit dashboard."""
+    try:
+        conn = _get_audit_db()
+    except Exception:
+        return jsonify({})
+
+    rows_by_action = conn.execute(
+        "SELECT action, COUNT(*) as cnt FROM audit_log GROUP BY action ORDER BY cnt DESC"
+    ).fetchall()
+    rows_by_table = conn.execute(
+        "SELECT table_name, COUNT(*) as cnt FROM audit_log WHERE table_name IS NOT NULL GROUP BY table_name ORDER BY cnt DESC LIMIT 10"
+    ).fetchall()
+    rows_by_user = conn.execute(
+        "SELECT user_email, user_name, COUNT(*) as cnt FROM audit_log WHERE user_id != '' GROUP BY user_id ORDER BY cnt DESC LIMIT 10"
+    ).fetchall()
+    recent_users = conn.execute(
+        "SELECT DISTINCT user_email, user_name, MAX(occurred_at) as last_at FROM audit_log GROUP BY user_id ORDER BY last_at DESC LIMIT 5"
+    ).fetchall()
+    total_logs    = conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
+    total_changes = conn.execute("SELECT COUNT(*) FROM change_history").fetchone()[0]
+    conn.close()
+
+    return jsonify({
+        'total_logs':    total_logs,
+        'total_changes': total_changes,
+        'by_action':     [dict(r) for r in rows_by_action],
+        'by_table':      [dict(r) for r in rows_by_table],
+        'by_user':       [dict(r) for r in rows_by_user],
+        'recent_users':  [dict(r) for r in recent_users],
+    })
+
+
+@app.route('/api/audit/record/<table>/<int:record_id>', methods=['GET'])
+def get_record_history(table, record_id):
+    """Full audit trail for a specific record."""
+    try:
+        conn = _get_audit_db()
+    except Exception:
+        return jsonify({'logs': [], 'changes': []})
+
+    logs    = conn.execute(
+        "SELECT * FROM audit_log WHERE table_name=? AND record_id=? ORDER BY id DESC",
+        (table, record_id)
+    ).fetchall()
+    changes = conn.execute(
+        "SELECT * FROM change_history WHERE table_name=? AND record_id=? ORDER BY id DESC",
+        (table, record_id)
+    ).fetchall()
+    conn.close()
+    return jsonify({'logs': [dict(r) for r in logs], 'changes': [dict(r) for r in changes]})
+
+# ═══════════════════════════════════════════════════════════════
+
+
 JWT_SECRET   = os.environ.get('JWT_SECRET', secrets.token_hex(32))
 JWT_EXPIRY_H = int(os.environ.get('JWT_EXPIRY_H', 168))  # 7 days
 
@@ -119,6 +404,8 @@ def auth_register():
         return jsonify({'error': 'E-mail já cadastrado'}), 409
     user = auth_db.create_user(email, password, name or email.split('@')[0])
     token = _make_token(user['id'], None)
+    audit_log('register', description=f'Novo usuário cadastrado: {email}',
+              extra={'email': email, 'name': name})
     return jsonify({'token': token, 'user': _safe_user(user)}), 201
 
 @app.route('/api/auth/login', methods=['POST'])
@@ -128,6 +415,8 @@ def auth_login():
     password = (d.get('password') or '').strip()
     user = auth_db.get_user_by_email(email)
     if not user or not auth_db.verify_password(user, password):
+        audit_log('login_fail', description=f'Tentativa de login falhou: {email}',
+                  extra={'email': email})
         return jsonify({'error': 'E-mail ou senha inválidos'}), 401
     # 2FA required?
     if user['totp_enabled']:
@@ -141,6 +430,10 @@ def auth_login():
         if org and org['require_2fa'] and not user['totp_enabled']:
             return jsonify({'error': 'Esta organização exige autenticação de dois fatores (2FA). Ative o 2FA antes de continuar.'}), 403
     token = _make_token(user['id'], org_id)
+    # Manually set user for audit_log since before_request won't run mid-function
+    request.current_user = user
+    audit_log('login', description=f'Login bem-sucedido: {email}',
+              extra={'email': email, 'org_id': org_id})
     return jsonify({'token': token, 'user': _safe_user(user)})
 
 @app.route('/api/auth/verify-2fa', methods=['POST'])
@@ -157,8 +450,13 @@ def auth_verify_2fa():
         return jsonify({'error': 'Usuário sem 2FA configurado'}), 400
     totp = pyotp.TOTP(user['totp_secret'])
     if not totp.verify(code, valid_window=1):
+        audit_log('2fa_fail', description=f'Código 2FA inválido para {user["email"]}',
+                  extra={'email': user['email']})
         return jsonify({'error': 'Código 2FA inválido'}), 401
     token = _make_token(user['id'], org_id)
+    request.current_user = user
+    audit_log('login_2fa', description=f'Login com 2FA: {user["email"]}',
+              extra={'email': user['email'], 'org_id': org_id})
     return jsonify({'token': token, 'user': _safe_user(user)})
 
 @app.route('/api/auth/me', methods=['GET'])
@@ -171,6 +469,10 @@ def auth_me():
 
 @app.route('/api/auth/logout', methods=['POST'])
 def auth_logout():
+    try:
+        audit_log('logout', description='Logout')
+    except Exception:
+        pass
     return jsonify({'status': 'ok'})
 
 @app.route('/api/auth/change-password', methods=['POST'])
@@ -185,6 +487,7 @@ def auth_change_password():
     if len(new_pw) < 8:
         return jsonify({'error': 'A nova senha deve ter pelo menos 8 caracteres'}), 400
     auth_db.update_user_password(user['id'], new_pw)
+    audit_log('change_password', description='Senha alterada', extra={'email': user['email']})
     return jsonify({'status': 'ok'})
 
 # ── 2FA setup ─────────────────────────────────────────────────
@@ -1301,20 +1604,30 @@ def verify_accounts_integrity():
 def create_account():
     data = request.json
     conn = get_db_connection()
-    conn.execute('INSERT INTO accounts (name, type, balance, institution, currency) VALUES (?, ?, ?, ?, ?)',
+    cur = conn.execute('INSERT INTO accounts (name, type, balance, institution, currency) VALUES (?, ?, ?, ?, ?)',
                  (data['name'], data['type'], int(round(float(data.get('balance', 0)))), data.get('institution'), data.get('currency', 'BRL')))
+    new_id = cur.lastrowid
+    new_row = dict(conn.execute('SELECT * FROM accounts WHERE id=?', (new_id,)).fetchone())
     conn.commit()
     conn.close()
+    audit_log('create', 'accounts', new_id, new_data=new_row,
+              description=f'Conta criada: {data["name"]}')
     return jsonify({'status': 'success'}), 201
 
 @app.route('/api/accounts/<int:id>', methods=['PUT'])
 def update_account(id):
     data = request.json
     conn = get_db_connection()
+    old_row = conn.execute('SELECT * FROM accounts WHERE id=?', (id,)).fetchone()
+    old = dict(old_row) if old_row else {}
     conn.execute('UPDATE accounts SET name=?, type=?, balance=?, institution=?, currency=? WHERE id=?',
                  (data['name'], data['type'], int(round(float(data.get('balance', 0)))), data.get('institution'), data.get('currency', 'BRL'), id))
+    new_row = dict(conn.execute('SELECT * FROM accounts WHERE id=?', (id,)).fetchone())
     conn.commit()
     conn.close()
+    lid = audit_log('update', 'accounts', id, old_data=old, new_data=new_row,
+                    description=f'Conta atualizada: {old.get("name", id)}')
+    record_changes('accounts', id, old, new_row, audit_log_id=lid)
     return jsonify({'status': 'success'})
 
 @app.route('/api/accounts/<int:id>/sync', methods=['POST'])
@@ -1541,8 +1854,11 @@ def create_transaction():
         conn.execute('UPDATE accounts SET balance = balance - ? WHERE id=?', (amount, data['account_id']))
     elif data['type'] == 'income':
         conn.execute('UPDATE accounts SET balance = balance + ? WHERE id=?', (amount, data['account_id']))
+    new_row = dict(conn.execute('SELECT * FROM transactions WHERE id=?', (txn_id,)).fetchone())
     conn.commit()
     conn.close()
+    audit_log('create', 'transactions', txn_id, new_data=new_row,
+              description=f'Transação criada: {data.get("description", "")} ({data.get("type","")})')
     return jsonify({'status': 'success', 'id': txn_id}), 201
 
 @app.route('/api/transactions/<int:id>', methods=['PUT'])
@@ -1550,6 +1866,7 @@ def update_transaction(id):
     data = request.json
     conn = get_db_connection()
     old = conn.execute('SELECT * FROM transactions WHERE id=?', (id,)).fetchone()
+    old_dict = dict(old) if old else {}
     if old:
         if old['type'] == 'expense':
             conn.execute('UPDATE accounts SET balance = balance + ? WHERE id=?', (old['amount'], old['account_id']))
@@ -1607,14 +1924,19 @@ def update_transaction(id):
     elif data['type'] == 'income':
         conn.execute('UPDATE accounts SET balance = balance + ? WHERE id=?', (amount, data['account_id']))
     
+    new_row = dict(conn.execute('SELECT * FROM transactions WHERE id=?', (id,)).fetchone())
     conn.commit()
     conn.close()
+    lid = audit_log('update', 'transactions', id, old_data=old_dict, new_data=new_row,
+                    description=f'Transação atualizada: {old_dict.get("description", id)}')
+    record_changes('transactions', id, old_dict, new_row, audit_log_id=lid)
     return jsonify({'status': 'success'})
 
 @app.route('/api/transactions/<int:id>', methods=['DELETE'])
 def delete_transaction(id):
     conn = get_db_connection()
     old = conn.execute('SELECT * FROM transactions WHERE id=?', (id,)).fetchone()
+    old_dict = dict(old) if old else {}
     if old:
         if old['type'] == 'expense':
             conn.execute('UPDATE accounts SET balance = balance + ? WHERE id=?', (old['amount'], old['account_id']))
@@ -1623,6 +1945,9 @@ def delete_transaction(id):
         conn.execute('DELETE FROM transactions WHERE id=?', (id,))
     conn.commit()
     conn.close()
+    if old_dict:
+        audit_log('delete', 'transactions', id, old_data=old_dict,
+                  description=f'Transação excluída: {old_dict.get("description", id)}')
     return jsonify({'status': 'success'})
 
 @app.route('/api/transactions/<int:txn_id>/ref-candidates', methods=['GET'])
@@ -1773,12 +2098,16 @@ def create_investment():
     conn.commit()
     last = dict(conn.execute('SELECT * FROM investments ORDER BY id DESC LIMIT 1').fetchone())
     conn.close()
+    audit_log('create', 'investments', last['id'], new_data=last,
+              description=f'Investimento criado: {data.get("name", "")}')
     return jsonify(last), 201
 
 @app.route('/api/investments/<int:id>', methods=['PUT'])
 def update_investment(id):
     data = request.json or {}
     conn = get_db_connection()
+    old_row = conn.execute('SELECT * FROM investments WHERE id=?', (id,)).fetchone()
+    old = dict(old_row) if old_row else {}
     purchase_price = int(round(float(data.get('purchase_price', 0)) * 100))
     current_price  = int(round(float(data.get('current_price', 0)) * 100)) or purchase_price
     gross_value    = int(round(float(data.get('gross_value', 0)) * 100))
@@ -1806,19 +2135,162 @@ def update_investment(id):
         gross_value, net_value, tax, quota_value, data.get('quota_date', ''),
         data.get('notes', ''), data.get('institution', ''), applied, id
     ))
+    new_row = dict(conn.execute('SELECT * FROM investments WHERE id=?', (id,)).fetchone())
     conn.commit()
     conn.close()
+    lid = audit_log('update', 'investments', id, old_data=old, new_data=new_row,
+                    description=f'Investimento atualizado: {old.get("name", id)}')
+    record_changes('investments', id, old, new_row, audit_log_id=lid)
     return jsonify({'status': 'success'})
 
 @app.route('/api/investments/<int:id>', methods=['DELETE'])
 def delete_investment(id):
     conn = get_db_connection()
+    old_row = conn.execute('SELECT * FROM investments WHERE id=?', (id,)).fetchone()
+    old = dict(old_row) if old_row else {}
     conn.execute('DELETE FROM investments WHERE id=?', (id,))
     conn.commit()
     conn.close()
+    if old:
+        audit_log('delete', 'investments', id, old_data=old,
+                  description=f'Investimento excluído: {old.get("name", id)}')
     return jsonify({'status': 'success'})
 
 # ── Market Data ────────────────────────────────────────────────────────────────
+
+# ── Market Data DB (separate persistent store) ────────────────────────────────
+_MARKET_DB_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)),
+    'data', 'market-data.db'
+)
+
+def _get_market_db():
+    """Get a connection to the market-data SQLite database."""
+    os.makedirs(os.path.dirname(_MARKET_DB_PATH), exist_ok=True)
+    conn = sqlite3.connect(_MARKET_DB_PATH, timeout=5.0)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute('''CREATE TABLE IF NOT EXISTS market_snapshots (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        queried_at  TEXT    NOT NULL DEFAULT (datetime('now')),
+        source      TEXT    NOT NULL,
+        indicator   TEXT    NOT NULL,
+        value       REAL,
+        changed     INTEGER DEFAULT 0,
+        prev_value  REAL,
+        metadata    TEXT
+    )''')
+    conn.execute('''CREATE INDEX IF NOT EXISTS idx_ms_indicator ON market_snapshots(indicator)''')
+    conn.execute('''CREATE INDEX IF NOT EXISTS idx_ms_queried   ON market_snapshots(queried_at)''')
+    conn.commit()
+    return conn
+
+
+def _log_market_data(result: dict):
+    """Persist market data snapshot, flagging rows where value changed."""
+    conn = _get_market_db()
+    now = datetime.now(timezone.utc).isoformat()
+
+    def _last(indicator):
+        row = conn.execute(
+            "SELECT value FROM market_snapshots WHERE indicator=? ORDER BY id DESC LIMIT 1",
+            (indicator,)
+        ).fetchone()
+        return row[0] if row else None
+
+    def _insert(source, indicator, value, metadata=None):
+        if value is None:
+            return
+        prev = _last(indicator)
+        changed = 1 if prev is None or abs((prev or 0) - value) > 1e-8 else 0
+        conn.execute(
+            "INSERT INTO market_snapshots (queried_at, source, indicator, value, changed, prev_value, metadata) VALUES (?,?,?,?,?,?,?)",
+            (now, source, indicator, value, changed, prev, json.dumps(metadata) if metadata else None)
+        )
+
+    for key in ('cdi', 'selic', 'ipca'):
+        _insert('bcb', key, result.get(key))
+    _insert('awesomeapi', 'usd_brl', result.get('usd'))
+    _insert('awesomeapi', 'eur_brl', result.get('eur'))
+    for ticker, info in (result.get('stocks') or {}).items():
+        _insert('brapi', f'stock_{ticker}', info.get('price'), {'change_pct': info.get('change_pct'), 'name': info.get('name')})
+    for sym, info in (result.get('crypto') or {}).items():
+        _insert('coingecko', f'crypto_{sym}_brl', info.get('price_brl'), {'price_usd': info.get('price_usd'), 'change_24h': info.get('change_24h')})
+        _insert('coingecko', f'crypto_{sym}_usd', info.get('price_usd'))
+
+    conn.commit()
+    conn.close()
+
+
+@app.route('/api/market-data/history', methods=['GET'])
+def get_market_data_history():
+    """Return market data history with optional filters."""
+    indicator = request.args.get('indicator', '')
+    source    = request.args.get('source', '')
+    changed   = request.args.get('changed')
+    limit     = min(int(request.args.get('limit', 500)), 2000)
+    offset    = int(request.args.get('offset', 0))
+    date_from = request.args.get('date_from', '')
+    date_to   = request.args.get('date_to', '')
+    try:
+        conn = _get_market_db()
+    except Exception as e:
+        return jsonify({'error': str(e), 'total': 0, 'items': []}), 500
+    where, params = [], []
+    if indicator:
+        where.append("indicator LIKE ?"); params.append(f'%{indicator}%')
+    if source:
+        where.append("source=?"); params.append(source)
+    if changed == '1':
+        where.append("changed=1")
+    if date_from:
+        where.append("queried_at >= ?"); params.append(date_from)
+    if date_to:
+        where.append("queried_at <= ?"); params.append(date_to + 'T23:59:59')
+    clause = ('WHERE ' + ' AND '.join(where)) if where else ''
+    total = conn.execute(f"SELECT COUNT(*) FROM market_snapshots {clause}", params).fetchone()[0]
+    rows  = conn.execute(
+        f"SELECT * FROM market_snapshots {clause} ORDER BY id DESC LIMIT ? OFFSET ?",
+        params + [limit, offset]
+    ).fetchall()
+    conn.close()
+    return jsonify({'total': total, 'items': [dict(r) for r in rows]})
+
+
+@app.route('/api/market-data/indicators', methods=['GET'])
+def get_market_data_indicators():
+    """Return list of distinct indicators + latest value."""
+    try:
+        conn = _get_market_db()
+    except Exception:
+        return jsonify([])
+    rows = conn.execute('''
+        SELECT indicator, source, value, queried_at,
+               COUNT(*) AS total_records,
+               SUM(changed) AS total_changes
+        FROM market_snapshots
+        GROUP BY indicator
+        ORDER BY indicator
+    ''').fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.route('/api/market-data/timeseries/<indicator>', methods=['GET'])
+def get_market_data_timeseries(indicator):
+    """Return time-series data for a specific indicator."""
+    limit = min(int(request.args.get('limit', 200)), 1000)
+    try:
+        conn = _get_market_db()
+    except Exception:
+        return jsonify([])
+    rows = conn.execute(
+        "SELECT queried_at, value, changed, prev_value FROM market_snapshots WHERE indicator=? ORDER BY id ASC LIMIT ?",
+        (indicator, limit)
+    ).fetchall()
+    conn.close()
+    return jsonify([dict(r) for r in rows])
+
 
 @app.route('/api/investments/market-data', methods=['GET'])
 def get_market_data():
@@ -1831,15 +2303,15 @@ def get_market_data():
         'errors': []
     }
 
-    def _fetch(url, timeout=5):
+    def _fetch(url, timeout=6):
         try:
             req = urllib.request.Request(url, headers={'User-Agent': 'FinancePro/1.0'})
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return _json.loads(resp.read().decode())
-        except Exception as e:
+        except Exception:
             return None
 
-    # ── BCB time series: CDI (11) SELIC (432) IPCA (433) ──────────────────
+    # ── BCB: CDI (11) SELIC (432) IPCA (433) ──────────────────────────────
     _bcb_ids = {'cdi': 11, 'selic': 432, 'ipca': 433}
     for key, sid in _bcb_ids.items():
         data = _fetch(f'https://api.bcb.gov.br/dados/serie/bcdata.sgs.{sid}/dados/ultimos/1?formato=json')
@@ -1869,6 +2341,11 @@ def get_market_data():
     cryptos = [r[0] for r in conn.execute(
         "SELECT DISTINCT ticker FROM investments WHERE type='crypto' AND ticker IS NOT NULL AND ticker != ''"
     ).fetchall()]
+    # Also collect from name field (older entries without ticker)
+    crypto_names = [r[0] for r in conn.execute(
+        "SELECT DISTINCT UPPER(name) FROM investments WHERE type='crypto' AND (ticker IS NULL OR ticker='')"
+    ).fetchall()]
+    all_cryptos = list({c for c in cryptos + crypto_names if c})
     conn.close()
 
     # ── BRAPI: stocks/FIIs ─────────────────────────────────────────────────
@@ -1885,27 +2362,35 @@ def get_market_data():
         else:
             result['errors'].append('brapi_stocks')
 
-    # ── CoinGecko: crypto ──────────────────────────────────────────────────
+    # ── CoinGecko: crypto (BRL + USD) ──────────────────────────────────────
     _cg_map = {
         'BTC': 'bitcoin', 'ETH': 'ethereum', 'SOL': 'solana',
         'BNB': 'binancecoin', 'ADA': 'cardano', 'DOT': 'polkadot',
         'MATIC': 'matic-network', 'LINK': 'chainlink', 'AVAX': 'avalanche-2',
         'XRP': 'ripple', 'DOGE': 'dogecoin', 'LTC': 'litecoin',
+        'NEAR': 'near', 'FTM': 'fantom', 'USDT': 'tether', 'USDC': 'usd-coin',
     }
-    if cryptos:
-        ids = ','.join(_cg_map.get(c.upper(), c.lower()) for c in cryptos if c)
+    if all_cryptos:
+        ids = ','.join(_cg_map.get(c.upper(), c.lower()) for c in all_cryptos if c)
         if ids:
-            cg = _fetch(f'https://api.coingecko.com/api/v3/simple/price?ids={ids}&vs_currencies=brl&include_24hr_change=true')
+            cg = _fetch(f'https://api.coingecko.com/api/v3/simple/price?ids={ids}&vs_currencies=brl,usd&include_24hr_change=true')
             if cg:
-                for sym in cryptos:
+                for sym in all_cryptos:
                     cg_id = _cg_map.get(sym.upper(), sym.lower())
                     if cg_id in cg:
                         result['crypto'][sym.upper()] = {
                             'price_brl': cg[cg_id].get('brl'),
+                            'price_usd': cg[cg_id].get('usd'),
                             'change_24h': cg[cg_id].get('brl_24h_change'),
                         }
             else:
                 result['errors'].append('coingecko')
+
+    # ── Log to market-data.db ──────────────────────────────────────────────
+    try:
+        _log_market_data(result)
+    except Exception as _log_err:
+        result['errors'].append(f'log_err')
 
     return jsonify(result)
 
@@ -2125,8 +2610,11 @@ def create_entity():
          data.get('notes',''), data.get('display_name',''), int(data.get('exclude_from_reports', 0)))
     )
     eid = cur.lastrowid
+    new_row = dict(conn.execute('SELECT * FROM entities WHERE id=?', (eid,)).fetchone())
     conn.commit()
     conn.close()
+    audit_log('create', 'entities', eid, new_data=new_row,
+              description=f'Entidade criada: {data["name"]}')
     return jsonify({'status': 'success', 'id': eid}), 201
 
 @app.route('/api/entities/<int:id>', methods=['PUT'])
@@ -2135,6 +2623,8 @@ def update_entity(id):
     conn = get_db_connection()
     if data.get('legal_name'):
        data['name'] = data['legal_name']
+    old_row = conn.execute('SELECT * FROM entities WHERE id=?', (id,)).fetchone()
+    old = dict(old_row) if old_row else {}
     conn.execute(
         'UPDATE entities SET name=?, type=?, document=?, bank=?, notes=?, flags=?, original_entity_id=?, display_name=?, exclude_from_reports=? WHERE id=?',
         (data['name'], data.get('type','company'), data.get('document',''), data.get('bank',''),
@@ -2142,17 +2632,26 @@ def update_entity(id):
          data.get('display_name',''), int(data.get('exclude_from_reports', 0)), id)
     )
     _sync_tags(conn, 'entity', id, data.get('tags', []))
+    new_row = dict(conn.execute('SELECT * FROM entities WHERE id=?', (id,)).fetchone())
     conn.commit()
     conn.close()
+    lid = audit_log('update', 'entities', id, old_data=old, new_data=new_row,
+                    description=f'Entidade atualizada: {old.get("name", id)}')
+    record_changes('entities', id, old, new_row, audit_log_id=lid)
     return jsonify({'status': 'success'})
 
 @app.route('/api/entities/<int:id>', methods=['DELETE'])
 def delete_entity(id):
     conn = get_db_connection()
+    old_row = conn.execute('SELECT * FROM entities WHERE id=?', (id,)).fetchone()
+    old = dict(old_row) if old_row else {}
     conn.execute('UPDATE transactions SET entity_id=NULL WHERE entity_id=?', (id,))
     conn.execute('DELETE FROM entities WHERE id=?', (id,))
     conn.commit()
     conn.close()
+    if old:
+        audit_log('delete', 'entities', id, old_data=old,
+                  description=f'Entidade excluída: {old.get("name", id)}')
     return jsonify({'status': 'success'})
 
 @app.route('/api/entities/<int:id>/transactions', methods=['GET'])
