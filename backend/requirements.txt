@@ -5,4 +5,4 @@ pyotp==2.9.0
 openai==1.12.0
 Werkzeug==3.0.1
 cryptography==42.0.5
-dotenv==0.9.9
+dotenv==0.9.9psycopg[binary]==3.1.18

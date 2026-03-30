@@ -8,22 +8,26 @@ _default_db_dir = os.environ.get(
 DB_DIRECTORY = _default_db_dir
 DB_PATH = os.path.join(DB_DIRECTORY, 'user/finance.db')
 
+import db_adapter
+
 # Mutable current DB — can be switched at runtime without restarting
 _current_db_path = DB_PATH
+_current_db_engine = 'sqlite'
 
-def set_current_db(path: str):
-    """Point all subsequent get_db_connection() calls to a different DB file."""
-    global _current_db_path
+def set_current_db(path: str, engine: str = 'sqlite'):
+    """Point all subsequent get_db_connection() calls to a different DB file or DSN."""
+    global _current_db_path, _current_db_engine
     _current_db_path = path
+    _current_db_engine = engine
 
 def get_current_db_path() -> str:
     return _current_db_path
 
+def get_current_db_engine() -> str:
+    return _current_db_engine
+
 def get_db_connection():
-    conn = sqlite3.connect(_current_db_path, timeout=5.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    return conn
+    return db_adapter.get_connection(_current_db_engine, _current_db_path)
 
 def init_db():
     conn = get_db_connection()

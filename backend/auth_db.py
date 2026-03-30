@@ -7,6 +7,11 @@ from werkzeug.security import generate_password_hash, check_password_hash
 
 AUTH_DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data/auth.db')
 
+AUTH_DB_TYPE = os.environ.get('AUTH_DB_TYPE', 'sqlite')
+AUTH_DB_DSN = os.environ.get('AUTH_DB_DSN', AUTH_DB_PATH)
+
+import db_adapter
+
 SCHEMA = '''
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
@@ -76,17 +81,21 @@ CREATE TABLE IF NOT EXISTS central_config (
 );
 '''
 
-
 def get_auth_conn():
-    conn = sqlite3.connect(AUTH_DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys=ON")
-    return conn
-
+    return db_adapter.get_connection(AUTH_DB_TYPE, AUTH_DB_DSN)
 
 def init_auth_db():
-    conn = sqlite3.connect(AUTH_DB_PATH)
+    conn = get_auth_conn()
     conn.executescript(SCHEMA)
+    
+    # Ad-hoc migrations
+    try:
+        conn.execute("ALTER TABLE org_databases ADD COLUMN engine TEXT DEFAULT 'sqlite'")
+        conn.execute("ALTER TABLE org_databases ADD COLUMN dsn TEXT")
+    except Exception:
+        pass
+    
+    conn.commit()
     conn.close()
 
 
@@ -275,9 +284,8 @@ def get_org_databases(org_id: str) -> list:
     return [dict(r) for r in rows]
 
 
-def add_org_database(org_id: str, db_path: str, db_name: str, created_by: str, access_mode: str = 'all_members', type: str = 'api', base_url: str = '', filename: str = '', user_id: str = None) -> dict:
+def add_org_database(org_id: str, db_path: str, db_name: str, created_by: str, access_mode: str = 'all_members', type: str = 'api', base_url: str = '', filename: str = '', user_id: str = None, engine: str = 'sqlite', dsn: str = '') -> dict:
     conn = get_auth_conn()
-    # Upsert logic (if it already exists for this org/path, return it)
     existing = conn.execute(
         "SELECT * FROM org_databases WHERE org_id=? AND db_path=?", (org_id, db_path)
     ).fetchone()
@@ -287,9 +295,9 @@ def add_org_database(org_id: str, db_path: str, db_name: str, created_by: str, a
     new_id = uid()
     conn.execute(
         """INSERT INTO org_databases 
-           (id, org_id, user_id, db_path, db_name, access_mode, created_by, type, base_url, filename) 
-           VALUES (?,?,?,?,?,?,?,?,?,?)""",
-        (new_id, org_id, user_id or created_by, db_path, db_name, access_mode, created_by, type, base_url, filename)
+           (id, org_id, user_id, db_path, db_name, access_mode, created_by, type, base_url, filename, engine, dsn) 
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (new_id, org_id, user_id or created_by, db_path, db_name, access_mode, created_by, type, base_url, filename, engine, dsn)
     )
     conn.commit()
     row = conn.execute("SELECT * FROM org_databases WHERE id=?", (new_id,)).fetchone()
@@ -383,11 +391,11 @@ def remove_db_config(id_):
     conn.close()
 
 
-def update_db_config(id_, name, type_, base_url, db_path, filename):
+def update_db_config(id_, name, type_, base_url, db_path, filename, engine='sqlite', dsn=''):
     conn = get_auth_conn()
     conn.execute(
-        "UPDATE org_databases SET db_name=?,type=?,base_url=?,db_path=?,filename=?,updated_at=datetime('now') WHERE id=?",
-        (name, type_, base_url, db_path, filename, id_)
+        "UPDATE org_databases SET db_name=?,type=?,base_url=?,db_path=?,filename=?,engine=?,dsn=?,updated_at=datetime('now') WHERE id=?",
+        (name, type_, base_url, db_path, filename, engine, dsn, id_)
     )
     conn.commit()
     conn.close()

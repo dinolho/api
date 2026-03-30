@@ -24,6 +24,13 @@ services:
       - FLASK_ENV=development
       - FLASK_DEBUG=1
       - SYNC_FILE_API=${SYNC_FILE_API:-}
+      - AUTH_DB_TYPE=postgres
+      - AUTH_DB_DSN=postgresql://finances:password@postgres:5432/finances_auth
+      - AUDIT_DB_TYPE=postgres
+      - AUDIT_DB_DSN=postgresql://finances:password@postgres:5432/finances_auth
+    depends_on:
+      postgres:
+        condition: service_started
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5001/')"]
       interval: 10s
@@ -51,5 +58,20 @@ services:
         condition: service_healthy
     environment:
       - VITE_API_HOST=backend        # Proxy /api → http://backend:5001
-      - CHOKIDAR_USEPOLLING=true     # Needed for file-watch to work inside Docker
-      
+      - CHOKIDAR_USEPOLLING=true
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: finances-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: finances
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: finances_auth
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+volumes:
+  pgdata:

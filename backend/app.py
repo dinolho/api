@@ -27,17 +27,21 @@ auth_db.init_auth_db()
 # ──  AUDITORIA & HISTÓRICO DE ALTERAÇÕES  ───────────────────
 # ═══════════════════════════════════════════════════════════════
 
+import db_adapter
+
 _AUDIT_DB_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     'data', 'audit.db'
 )
+_AUDIT_DB_TYPE = os.environ.get('AUDIT_DB_TYPE', 'sqlite')
+_AUDIT_DB_DSN = os.environ.get('AUDIT_DB_DSN', _AUDIT_DB_PATH)
 
 def _get_audit_db():
-    """Return an open connection to the dedicated audit SQLite database."""
-    os.makedirs(os.path.dirname(_AUDIT_DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(_AUDIT_DB_PATH, timeout=5.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    """Return an open connection to the dedicated audit database."""
+    if _AUDIT_DB_TYPE.lower() == 'sqlite':
+        os.makedirs(os.path.dirname(_AUDIT_DB_PATH), exist_ok=True)
+    
+    conn = db_adapter.get_connection(_AUDIT_DB_TYPE, _AUDIT_DB_DSN)
 
     # ── Audit log: one row per event ──────────────────────────────────────────
     conn.execute('''
@@ -2163,13 +2167,16 @@ _MARKET_DB_PATH = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
     'data', 'market-data.db'
 )
+_MARKET_DB_TYPE = os.environ.get('MARKET_DB_TYPE', 'sqlite')
+_MARKET_DB_DSN = os.environ.get('MARKET_DB_DSN', _MARKET_DB_PATH)
 
 def _get_market_db():
-    """Get a connection to the market-data SQLite database."""
-    os.makedirs(os.path.dirname(_MARKET_DB_PATH), exist_ok=True)
-    conn = sqlite3.connect(_MARKET_DB_PATH, timeout=5.0)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
+    """Get a connection to the market-data database."""
+    if _MARKET_DB_TYPE.lower() == 'sqlite':
+        os.makedirs(os.path.dirname(_MARKET_DB_PATH), exist_ok=True)
+        
+    conn = db_adapter.get_connection(_MARKET_DB_TYPE, _MARKET_DB_DSN)
+    
     conn.execute('''CREATE TABLE IF NOT EXISTS market_snapshots (
         id          INTEGER PRIMARY KEY AUTOINCREMENT,
         queried_at  TEXT    NOT NULL DEFAULT (datetime('now')),
