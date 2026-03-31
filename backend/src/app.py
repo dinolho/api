@@ -1054,7 +1054,7 @@ def create_database():
         db_module.set_current_db(db_module.get_current_db_path(), db_module.get_current_db_engine())
         return jsonify({'error': str(e)}), 500
         
-    return jsonify({'status': 'created', 'path': db_path, 'name': db_name_display}), 201
+    return jsonify({'status': 'created', 'path': db_path, 'name': raw_name}), 201
 
 
 @app.route('/api/databases/current', methods=['GET'])
@@ -1063,7 +1063,7 @@ def get_current_database():
     engine = db_module.get_current_db_engine()
     return jsonify({
         'path': path,
-        'name': os.path.basename(path) if engine == 'sqlite' else path.split('/')[-1],
+        'name': auth_db.get_db_name_by_path(path) or (os.path.basename(path) if engine == 'sqlite' else path.split('/')[-1]),
         'is_current': True,
         'engine': engine
     })
@@ -1115,7 +1115,7 @@ def select_database():
         migrate_db()
     except Exception:
         pass
-    return jsonify({'status': 'ok', 'name': os.path.basename(db_path_resolved) if engine == 'sqlite' else db_path_resolved.split('/')[-1], 'path': db_path_resolved})
+    return jsonify({'status': 'ok', 'name': target_db.get('db_name') or (os.path.basename(db_path_resolved) if engine == 'sqlite' else db_path_resolved.split('/')[-1]), 'path': db_path_resolved})
 
 
 # ─── DB CONFIGS (user-registered connection configs, cloud-saved) ──────────────
@@ -2922,21 +2922,7 @@ def import_statement():
 # ─── PROCESSAR ARQUIVOS ────────────────────────────────────────────────────────
 
 def _ensure_file_imports_table(conn):
-    """Create the file_imports log table if it doesn't exist."""
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS file_imports (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            filename    TEXT NOT NULL,
-            md5         TEXT NOT NULL UNIQUE,
-            bank        TEXT NOT NULL,
-            account_id  INTEGER,
-            imported    INTEGER DEFAULT 0,
-            duplicates  INTEGER DEFAULT 0,
-            invalid     INTEGER DEFAULT 0,
-            processed_at TEXT DEFAULT (datetime('now'))
-        )
-    ''')
-    conn.commit()
+    pass
 
 
 def _file_md5(path: str) -> str:

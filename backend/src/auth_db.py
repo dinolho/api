@@ -2,7 +2,8 @@
 auth_db.py — Multi-tenant auth database for FinancePro
 Separate from financial DBs. Stored as auth.db at the app root.
 """
-import sqlite3, os, secrets
+import sqlite3, os, secrets, base64
+from cryptography.fernet import Fernet
 from werkzeug.security import generate_password_hash, check_password_hash
 
 AUTH_DB_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'data/auth.db')
@@ -275,34 +276,80 @@ def remove_member(org_id: str, user_id: str):
 
 
 # ── Org Databases ─────────────────────────────────────────────
+def _get_db_fernet():
+    key = os.environ.get('ENCRYPTION_KEY_DB')
+    if not key: return None
+    key_bytes = key.encode('utf-8')
+    key_bytes = key_bytes.ljust(32, b'0')[:32]
+    return Fernet(base64.urlsafe_b64encode(key_bytes))
+
+def _encrypt_db_field(val: str) -> str:
+    if not val: return val
+    f = _get_db_fernet()
+    if not f: return val
+    try:
+        if val.startswith('gAAAAA'): return val
+        return f.encrypt(val.encode('utf-8')).decode('utf-8')
+    except Exception:
+        return val
+
+def _decrypt_db_field(val: str) -> str:
+    if not val: return val
+    f = _get_db_fernet()
+    if not f: return val
+    try:
+        return f.decrypt(val.encode('utf-8')).decode('utf-8')
+    except Exception:
+        return val
+
+def _decrypt_db_row(row):
+    d = dict(row)
+    if 'db_path' in d: d['db_path'] = _decrypt_db_field(d['db_path'])
+    if 'dsn' in d: d['dsn'] = _decrypt_db_field(d['dsn'])
+    return d
+
 def get_org_databases(org_id: str) -> list:
     conn = get_auth_conn()
     rows = conn.execute(
         "SELECT * FROM org_databases WHERE org_id=? ORDER BY created_at ASC", (org_id,)
     ).fetchall()
     conn.close()
-    return [dict(r) for r in rows]
+    return [_decrypt_db_row(r) for r in rows]
 
+def get_db_name_by_path(db_path: str) -> str:
+    conn = get_auth_conn()
+    rows = conn.execute("SELECT db_path, db_name FROM org_databases").fetchall()
+    conn.close()
+    for row in rows:
+        if _decrypt_db_field(row['db_path']) == db_path:
+            return row['db_name']
+    return None
 
 def add_org_database(org_id: str, db_path: str, db_name: str, created_by: str, access_mode: str = 'all_members', type: str = 'api', base_url: str = '', filename: str = '', user_id: str = None, engine: str = 'sqlite', dsn: str = '') -> dict:
     conn = get_auth_conn()
-    existing = conn.execute(
-        "SELECT * FROM org_databases WHERE org_id=? AND db_path=?", (org_id, db_path)
-    ).fetchone()
+    ROWS = conn.execute("SELECT * FROM org_databases WHERE org_id=?", (org_id,)).fetchall()
+    existing = None
+    for r in ROWS:
+        if _decrypt_db_field(r['db_path']) == db_path:
+            existing = r
+            break
+            
     if existing:
         conn.close()
-        return dict(existing)
+        return _decrypt_db_row(existing)
     new_id = uid()
+    enc_path = _encrypt_db_field(db_path)
+    enc_dsn = _encrypt_db_field(dsn)
     conn.execute(
         """INSERT INTO org_databases 
            (id, org_id, user_id, db_path, db_name, access_mode, created_by, type, base_url, filename, engine, dsn) 
            VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (new_id, org_id, user_id or created_by, db_path, db_name, access_mode, created_by, type, base_url, filename, engine, dsn)
+        (new_id, org_id, user_id or created_by, enc_path, db_name, access_mode, created_by, type, base_url, filename, engine, enc_dsn)
     )
     conn.commit()
     row = conn.execute("SELECT * FROM org_databases WHERE id=?", (new_id,)).fetchone()
     conn.close()
-    return dict(row)
+    return _decrypt_db_row(row)
 
 
 def remove_org_database(org_database_id: str):
@@ -315,9 +362,13 @@ def remove_org_database(org_database_id: str):
 def can_access_db(org_id: str, user_id: str, db_path: str) -> bool:
     """Returns True if user can access the given db_path in the org."""
     conn = get_auth_conn()
-    odb = conn.execute(
-        "SELECT * FROM org_databases WHERE org_id=? AND db_path=?", (org_id, db_path)
-    ).fetchone()
+    ROWS = conn.execute("SELECT * FROM org_databases WHERE org_id=?", (org_id,)).fetchall()
+    odb = None
+    for r in ROWS:
+        if _decrypt_db_field(r['db_path']) == db_path:
+            odb = r
+            break
+
     if not odb:
         conn.close()
         return False
