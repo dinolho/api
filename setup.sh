@@ -9,6 +9,8 @@ source .env
 PG_USER=${PG_USER:-$POSTGRES_USER}
 PG_PASSWORD=${PG_PASSWORD:-$POSTGRES_PASSWORD}
 PG_DB=${PG_DB:-${POSTGRES_DB_USER:-$DEFAULT_USER_DB}}
+PG_DB_AUTH=${PG_DB_AUTH:-$POSTGRES_DB_AUTH}
+PG_DB_AUDIT=${PG_DB_AUDIT:-$POSTGRES_DB_AUDIT}
 
 echo "Iniciando Docker Compose (caso nao esteja rodando)..."
 docker compose up -d
@@ -28,9 +30,14 @@ if ! docker compose exec -T -e PGPASSWORD=${PG_PASSWORD} postgres psql -U ${PG_U
   docker compose exec -T -e PGPASSWORD=${PG_PASSWORD} postgres psql -U ${PG_USER} -d postgres -c "CREATE DATABASE ${PG_DB};"
 fi
 
-echo "Rodando migrations do Alembic no banco financeiro (via migration.sh)..."
+echo "Rodando migrations do Alembic nos bancos principais (Auth e Audit)..."
+docker compose exec -T backend ./migration.sh "postgresql://${PG_USER}:${PG_PASSWORD}@postgres:5432/${PG_DB_AUTH}" alembic-auth.ini
+docker compose exec -T backend ./migration.sh "postgresql://${PG_USER}:${PG_PASSWORD}@postgres:5432/${PG_DB_AUDIT}" alembic-audit.ini
+
+echo "Rodando migrations do Alembic no banco financeiro tenant padrão..."
 # Roda a tool migration.sh criada anteriormente, conectando no postgres do docker!
 docker compose exec -T backend ./migration.sh "postgresql://${PG_USER}:${PG_PASSWORD}@postgres:5432/${PG_DB}"
+
 
 echo "Bancos configurados com sucesso!"
 echo "O sistema esta pronto para uso."

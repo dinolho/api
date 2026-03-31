@@ -120,7 +120,7 @@ def create_user(email: str, password: str, name: str = '') -> dict:
 
 def get_user_by_email(email: str):
     conn = get_auth_conn()
-    row = conn.execute("SELECT * FROM users WHERE email=? COLLATE NOCASE", (email,)).fetchone()
+    row = conn.execute("SELECT * FROM users WHERE LOWER(email) = ?", (email.lower(),)).fetchone()
     conn.close()
     return dict(row) if row else None
 
@@ -378,7 +378,7 @@ def get_central_config(key: str) -> str | None:
 
 def set_central_config(key: str, value: str):
     conn = get_auth_conn()
-    conn.execute("INSERT OR REPLACE INTO central_config (key, value, updated_at) VALUES (?,?,datetime('now'))", (key, value))
+    db_adapter.upsert_config(conn, 'central_config', key, value)
     conn.commit()
     conn.close()
 

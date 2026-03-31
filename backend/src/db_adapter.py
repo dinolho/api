@@ -7,6 +7,32 @@ try:
 except ImportError:
     psycopg = None
 
+def upsert_config(conn, table_name: str, key: str, value: str):
+    """Cross-database config upsert (INSERT OR REPLACE)."""
+    dialect = getattr(conn, 'dialect', 'sqlite')
+    if dialect == 'postgres':
+        sql = f"""
+            INSERT INTO {table_name} (key, value, updated_at) 
+            VALUES (?, ?, CURRENT_TIMESTAMP) 
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP
+        """
+        conn.execute(sql, (key, value))
+    elif dialect == 'mysql':
+        sql = f"""
+            INSERT INTO {table_name} (key, value, updated_at) 
+            VALUES (?, ?, CURRENT_TIMESTAMP) 
+            ON DUPLICATE KEY UPDATE value = VALUES(value), updated_at = CURRENT_TIMESTAMP
+        """
+        conn.execute(sql, (key, value))
+    else:
+        # SQLite
+        sql = f"""
+            INSERT OR REPLACE INTO {table_name} (key, value, updated_at) 
+            VALUES (?, ?, datetime('now'))
+        """
+        conn.execute(sql, (key, value))
+
+
 def translate_sqlite_to_postgres(sql: str) -> str:
     """Translates SQLite specific SQL syntax to PostgreSQL."""
     # Placeholders: ? to %s (Basic implementation, ignores ? inside strings)
@@ -139,7 +165,9 @@ def get_connection(type_: str, path_or_dsn: str):
     - path_or_dsn: file path (sqlite) or 'postgresql://...' (postgres)
     """
     if type_.lower() == 'postgres':
-        return PostgresConnectionWrapper(path_or_dsn)
+        conn = PostgresConnectionWrapper(path_or_dsn)
+        conn.dialect = 'postgres'
+        return conn
     else:
         # Default fallback to sqlite
         os.makedirs(os.path.dirname(os.path.abspath(path_or_dsn)), exist_ok=True)

@@ -17,14 +17,8 @@ down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
-def get_now_expr(dialect_name: str) -> text:
-    if dialect_name == 'postgresql':
-        return text("TO_CHAR(NOW() AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS')")
-    return text("datetime('now')")
-
 def upgrade() -> None:
     dialect = op.get_context().dialect.name
-    now_expr = get_now_expr(dialect)
 
     # Accounts
     op.create_table(
@@ -37,8 +31,8 @@ def upgrade() -> None:
         sa.Column('total_balance', sa.Integer(), server_default='0'),
         sa.Column('currency', sa.String(), server_default='BRL'),
         sa.Column('institution', sa.String(), nullable=True),
-        sa.Column('created_at', sa.String(), server_default=now_expr),
-        sa.Column('updated_at', sa.String(), server_default=now_expr),
+        sa.Column('created_at', sa.String(), server_default=sa.text('CURRENT_TIMESTAMP')),
+        sa.Column('updated_at', sa.String(), server_default=sa.text('CURRENT_TIMESTAMP')),
         sa.PrimaryKeyConstraint('id')
     )
 
@@ -55,8 +49,8 @@ def upgrade() -> None:
         sa.Column('original_entity_id', sa.Integer(), nullable=True),
         sa.Column('display_name', sa.String(), nullable=True),
         sa.Column('exclude_from_reports', sa.Integer(), server_default='0'),
-        sa.Column('created_at', sa.String(), server_default=now_expr),
-        sa.Column('updated_at', sa.String(), server_default=now_expr),
+        sa.Column('created_at', sa.String(), server_default=sa.text('CURRENT_TIMESTAMP')),
+        sa.Column('updated_at', sa.String(), server_default=sa.text('CURRENT_TIMESTAMP')),
         sa.ForeignKeyConstraint(['original_entity_id'], ['entities.id'], ),
         sa.PrimaryKeyConstraint('id')
     )
@@ -89,8 +83,8 @@ def upgrade() -> None:
         sa.Column('liquidation_date', sa.String(), nullable=True),
         sa.Column('metadata', sa.String(), nullable=True),
         sa.Column('transaction_ref_id', sa.Integer(), nullable=True),
-        sa.Column('created_at', sa.String(), server_default=now_expr),
-        sa.Column('updated_at', sa.String(), server_default=now_expr),
+        sa.Column('created_at', sa.String(), server_default=sa.text('CURRENT_TIMESTAMP')),
+        sa.Column('updated_at', sa.String(), server_default=sa.text('CURRENT_TIMESTAMP')),
         sa.ForeignKeyConstraint(['account_id'], ['accounts.id'], ),
         sa.ForeignKeyConstraint(['destination_account_id'], ['accounts.id'], ),
         sa.ForeignKeyConstraint(['entity_id'], ['entities.id'], ),
@@ -133,8 +127,8 @@ def upgrade() -> None:
         sa.Column('notes', sa.String(), nullable=True),
         sa.Column('institution', sa.String(), nullable=True),
         sa.Column('applied', sa.Integer(), server_default='0'),
-        sa.Column('created_at', sa.String(), server_default=now_expr),
-        sa.Column('updated_at', sa.String(), server_default=now_expr),
+        sa.Column('created_at', sa.String(), server_default=sa.text('CURRENT_TIMESTAMP')),
+        sa.Column('updated_at', sa.String(), server_default=sa.text('CURRENT_TIMESTAMP')),
         sa.ForeignKeyConstraint(['account_id'], ['accounts.id'], ),
         sa.PrimaryKeyConstraint('id')
     )
@@ -144,7 +138,7 @@ def upgrade() -> None:
         'redacted_texts',
         sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
         sa.Column('text', sa.String(), nullable=False),
-        sa.Column('created_at', sa.String(), server_default=now_expr),
+        sa.Column('created_at', sa.String(), server_default=sa.text('CURRENT_TIMESTAMP')),
         sa.PrimaryKeyConstraint('id'),
         sa.UniqueConstraint('text')
     )
@@ -154,7 +148,7 @@ def upgrade() -> None:
         'system_config',
         sa.Column('key', sa.String(), nullable=False),
         sa.Column('value', sa.String(), nullable=True),
-        sa.Column('updated_at', sa.String(), server_default=now_expr),
+        sa.Column('updated_at', sa.String(), server_default=sa.text('CURRENT_TIMESTAMP')),
         sa.PrimaryKeyConstraint('key')
     )
     op.bulk_insert(system_config_table, [
@@ -172,8 +166,8 @@ def upgrade() -> None:
         sa.Column('name', sa.String(), nullable=False),
         sa.Column('color', sa.String(), server_default='#6366f1'),
         sa.Column('icon', sa.String(), server_default='tag'),
-        sa.Column('created_at', sa.String(), server_default=now_expr),
-        sa.Column('updated_at', sa.String(), server_default=now_expr),
+        sa.Column('created_at', sa.String(), server_default=sa.text('CURRENT_TIMESTAMP')),
+        sa.Column('updated_at', sa.String(), server_default=sa.text('CURRENT_TIMESTAMP')),
         sa.PrimaryKeyConstraint('id'),
         sa.UniqueConstraint('name')
     )
@@ -199,8 +193,8 @@ def upgrade() -> None:
         'tags',
         sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
         sa.Column('name', sa.String(), nullable=False),
-        sa.Column('created_at', sa.String(), server_default=now_expr),
-        sa.Column('updated_at', sa.String(), server_default=now_expr),
+        sa.Column('created_at', sa.String(), server_default=sa.text('CURRENT_TIMESTAMP')),
+        sa.Column('updated_at', sa.String(), server_default=sa.text('CURRENT_TIMESTAMP')),
         sa.PrimaryKeyConstraint('id'),
         sa.UniqueConstraint('name')
     )
@@ -239,8 +233,8 @@ def upgrade() -> None:
         sa.Column('next_date', sa.String(), nullable=True),
         sa.Column('active', sa.Integer(), server_default='1'),
         sa.Column('notes', sa.String(), nullable=True),
-        sa.Column('created_at', sa.String(), server_default=now_expr),
-        sa.Column('updated_at', sa.String(), server_default=now_expr),
+        sa.Column('created_at', sa.String(), server_default=sa.text('CURRENT_TIMESTAMP')),
+        sa.Column('updated_at', sa.String(), server_default=sa.text('CURRENT_TIMESTAMP')),
         sa.ForeignKeyConstraint(['account_id'], ['accounts.id'], ),
         sa.ForeignKeyConstraint(['entity_id'], ['entities.id'], ),
         sa.PrimaryKeyConstraint('id')
@@ -256,8 +250,8 @@ def upgrade() -> None:
         sa.Column('value', sa.Integer(), server_default='0', nullable=False),
         sa.Column('acquisition_date', sa.String(), nullable=True),
         sa.Column('notes', sa.String(), nullable=True),
-        sa.Column('created_at', sa.String(), server_default=now_expr),
-        sa.Column('updated_at', sa.String(), server_default=now_expr),
+        sa.Column('created_at', sa.String(), server_default=sa.text('CURRENT_TIMESTAMP')),
+        sa.Column('updated_at', sa.String(), server_default=sa.text('CURRENT_TIMESTAMP')),
         sa.PrimaryKeyConstraint('id')
     )
 
@@ -276,8 +270,8 @@ def upgrade() -> None:
         sa.Column('status', sa.String(), server_default='pending'),
         sa.Column('recurring_id', sa.Integer(), nullable=True),
         sa.Column('transaction_id', sa.Integer(), nullable=True),
-        sa.Column('created_at', sa.String(), server_default=now_expr),
-        sa.Column('updated_at', sa.String(), server_default=now_expr),
+        sa.Column('created_at', sa.String(), server_default=sa.text('CURRENT_TIMESTAMP')),
+        sa.Column('updated_at', sa.String(), server_default=sa.text('CURRENT_TIMESTAMP')),
         sa.ForeignKeyConstraint(['account_id'], ['accounts.id'], ),
         sa.ForeignKeyConstraint(['entity_id'], ['entities.id'], ),
         sa.ForeignKeyConstraint(['recurring_id'], ['recurring_expenses.id'], ),
@@ -293,8 +287,8 @@ def upgrade() -> None:
         sa.Column('date', sa.String(), nullable=False),
         sa.Column('external_balance', sa.Integer(), nullable=True),
         sa.Column('notes', sa.String(), nullable=True),
-        sa.Column('created_at', sa.String(), server_default=now_expr),
-        sa.Column('updated_at', sa.String(), server_default=now_expr),
+        sa.Column('created_at', sa.String(), server_default=sa.text('CURRENT_TIMESTAMP')),
+        sa.Column('updated_at', sa.String(), server_default=sa.text('CURRENT_TIMESTAMP')),
         sa.ForeignKeyConstraint(['account_id'], ['accounts.id'], ondelete='CASCADE'),
         sa.PrimaryKeyConstraint('id'),
         sa.UniqueConstraint('account_id', 'date')

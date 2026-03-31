@@ -20,7 +20,8 @@ app = Flask(__name__, static_folder=None)
 CORS(app)
 
 # ─── Auth DB init ─────────────────────────────────────────────
-auth_db.init_auth_db()
+# Removed since we use alembic-auth.ini via startup scripts now
+# auth_db.init_auth_db()
 
 # ═══════════════════════════════════════════════════════════════
 # ──  AUDITORIA & HISTÓRICO DE ALTERAÇÕES  ───────────────────
@@ -42,49 +43,7 @@ def _get_audit_db():
     
     conn = db_adapter.get_connection(_AUDIT_DB_TYPE, _AUDIT_DB_DSN)
 
-    # ── Audit log: one row per event ──────────────────────────────────────────
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS audit_log (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            occurred_at TEXT    NOT NULL DEFAULT (datetime('now', 'utc')),
-            action      TEXT    NOT NULL,          -- create | update | delete | login | logout | ...
-            table_name  TEXT,                      -- affected DB table (NULL for system events)
-            record_id   INTEGER,                   -- PK of the affected row
-            user_id     TEXT,
-            user_email  TEXT,
-            user_name   TEXT,
-            ip          TEXT,
-            description TEXT,                      -- human-readable summary
-            old_data    TEXT,                      -- JSON snapshot before
-            new_data    TEXT,                      -- JSON snapshot after
-            extra       TEXT                       -- any extra JSON metadata
-        )
-    ''')
-
-    # ── Field-level change history ────────────────────────────────────────────
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS change_history (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            occurred_at TEXT    NOT NULL DEFAULT (datetime('now', 'utc')),
-            table_name  TEXT    NOT NULL,
-            record_id   INTEGER NOT NULL,
-            field       TEXT    NOT NULL,
-            old_value   TEXT,
-            new_value   TEXT,
-            user_id     TEXT,
-            user_email  TEXT,
-            user_name   TEXT,
-            audit_log_id INTEGER          -- FK → audit_log.id for grouping
-        )
-    ''')
-
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_al_action   ON audit_log(action)')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_al_table    ON audit_log(table_name)')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_al_user     ON audit_log(user_id)')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_al_date     ON audit_log(occurred_at)')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_ch_table_id ON change_history(table_name, record_id)')
-    conn.execute('CREATE INDEX IF NOT EXISTS idx_ch_date     ON change_history(occurred_at)')
-    conn.commit()
+    # Migrations are now handled by Alembic (migrations-audit)
     return conn
 
 
@@ -904,42 +863,65 @@ def index():
 
 # ─── DATABASE MANAGEMENT ─────────────────────────────────────────────────────
 
-def _db_summary(id: str, db_path: str) -> dict:
-    """Open any .db file temporarily and return a summary dict."""
-    import sqlite3 as _sq
-    
-    # Resolve relative paths against DB_DIRECTORY
-    if not os.path.isabs(db_path):
-        db_path = os.path.join(db_module.DB_DIRECTORY, db_path)
+def _db_summary(id: str, db_path: str, engine: str = 'sqlite') -> dict:
+    """Open any .db file or DSN temporarily and return a summary dict."""
     
     result = {
         "id": id,
         'path': db_path,
-        'name': os.path.basename(db_path),
-        'size': os.path.getsize(db_path) if os.path.exists(db_path) else 0,
-        'is_current': os.path.abspath(db_path) == os.path.abspath(db_module.get_current_db_path()),
+        'name': os.path.basename(db_path) if engine == 'sqlite' else db_path.split('/')[-1],
+        'size': os.path.getsize(db_path) if engine == 'sqlite' and os.path.exists(db_path) else 0,
+        'is_current': db_path == db_module.get_current_db_path(),
     }
+    
+    # Resolve relative paths against DB_DIRECTORY
+    if engine == 'sqlite':
+        if not os.path.isabs(db_path):
+            db_path = os.path.join(db_module.DB_DIRECTORY, db_path)
+            result['path'] = db_path
+            result['size'] = os.path.getsize(db_path) if os.path.exists(db_path) else 0
+            result['is_current'] = os.path.abspath(db_path) == os.path.abspath(db_module.get_current_db_path())
+    
     try:
-        conn = _sq.connect(db_path, timeout=2.0)
-        conn.row_factory = _sq.Row
-        result['total_balance'] = conn.execute('SELECT COALESCE(SUM(balance),0) FROM accounts').fetchone()[0]
-        result['account_count'] = conn.execute('SELECT COUNT(*) FROM accounts').fetchone()[0]
-        result['txn_count']     = conn.execute('SELECT COUNT(*) FROM transactions').fetchone()[0]
-        result['last_txn_date'] = conn.execute('SELECT MAX(date) FROM transactions').fetchone()[0]
+        conn = db_adapter.get_connection(engine, db_path)
+        
+        balance_row = conn.execute('SELECT COALESCE(SUM(balance),0) as val FROM accounts').fetchone()
+        result['total_balance'] = balance_row['val'] if type(balance_row) is dict else balance_row[0]
+        
+        acc_row = conn.execute('SELECT COUNT(*) as val FROM accounts').fetchone()
+        result['account_count'] = acc_row['val'] if type(acc_row) is dict else acc_row[0]
+        
+        txn_row = conn.execute('SELECT COUNT(*) as val FROM transactions').fetchone()
+        result['txn_count']     = txn_row['val'] if type(txn_row) is dict else txn_row[0]
+        
+        dt_row = conn.execute('SELECT MAX(date) as val FROM transactions').fetchone()
+        result['last_txn_date'] = dt_row['val'] if type(dt_row) is dict else dt_row[0]
+        
         # version
         ver_row = conn.execute("SELECT value FROM system_config WHERE key='db_version'").fetchone()
-        result['db_version'] = ver_row[0] if ver_row else '—'
-        # PIN protection flag (so frontend can hide values for locked DBs)
+        result['db_version'] = (ver_row['value'] if type(ver_row) is dict else ver_row[0]) if ver_row else '—'
+        
+        # PIN protection flag
         pin_row = conn.execute("SELECT value FROM system_config WHERE key='privacy_pin_hash'").fetchone()
-        result['has_pin'] = bool(pin_row and pin_row[0])
+        result['has_pin'] = bool(pin_row and (pin_row['value'] if type(pin_row) is dict else pin_row[0]))
+        
         # income/expense totals for current month
-        ym = datetime.now().strftime('%Y-%m')
-        result['month_income']  = conn.execute(
-            "SELECT COALESCE(SUM(amount),0) FROM transactions WHERE type='income' AND date LIKE ?", (ym+'%',)
-        ).fetchone()[0]
-        result['month_expense'] = conn.execute(
-            "SELECT COALESCE(SUM(amount),0) FROM transactions WHERE type='expense' AND date LIKE ?", (ym+'%',)
-        ).fetchone()[0]
+        now = datetime.now()
+        start_date = f"{now.year}-{now.month:02d}-01"
+        if now.month == 12:
+            end_date = f"{now.year + 1}-01-01"
+        else:
+            end_date = f"{now.year}-{now.month + 1:02d}-01"
+
+        inc_row = conn.execute(
+            "SELECT COALESCE(SUM(amount),0) as val FROM transactions WHERE type='income' AND date >= ? AND date < ?", (start_date, end_date)
+        ).fetchone()
+        result['month_income']  = inc_row['val'] if type(inc_row) is dict else inc_row[0]
+        
+        exp_row = conn.execute(
+            "SELECT COALESCE(SUM(amount),0) as val FROM transactions WHERE type='expense' AND date >= ? AND date < ?", (start_date, end_date)
+        ).fetchone()
+        result['month_expense'] = exp_row['val'] if type(exp_row) is dict else exp_row[0]
 
         # Real Wealth & Net Worth
         pat_rows = conn.execute('SELECT type, value, purchase_price, depreciation_rate, acquisition_date FROM patrimony_items').fetchall()
@@ -987,7 +969,9 @@ def list_databases():
     # Merge with file summary info
     results = []
     for odb in org_dbs:
-        summary = _db_summary(odb['id'], odb['db_path'])
+        engine = odb.get('engine', 'sqlite')
+        summary = _db_summary(odb['id'], odb['db_path'], engine=engine)
+        summary['engine'] = engine
         # Use the name registered in org_databases if it exists
         if odb.get('db_name'):
             summary['name'] = odb['db_name']
@@ -999,7 +983,7 @@ def list_databases():
 @app.route('/api/databases', methods=['POST'])
 @require_auth
 def create_database():
-    """Create a new SQLite .db file, initialise its schema, link to org and select it."""
+    """Create a new database (Pg/SQLite), link to org and select it."""
     org_id = request.current_org_id
     if not org_id:
         return jsonify({'error': 'Organização necessária para criar banco'}), 403
@@ -1008,62 +992,130 @@ def create_database():
     raw_name = (data.get('name') or '').strip()
     if not raw_name:
         return jsonify({'error': 'name is required'}), 400
-    # Sanitise: keep only safe chars
+    
+    engine = str(data.get('engine', 'postgres')).lower()
+    if engine not in ('postgres', 'sqlite'):
+        return jsonify({'error': 'invalid engine'}), 400
+
     import re
-    safe_name = re.sub(r'[^\w\-]', '_', raw_name)
-    if not safe_name.endswith('.db'):
-        safe_name += '.db'
-    db_path = os.path.join(db_module.DB_DIRECTORY, safe_name)
-    if os.path.exists(db_path):
-        return jsonify({'error': 'A database with this name already exists'}), 409
-    # Bootstrap schema
-    db_module.set_current_db(db_path)
+    import unicodedata
+    clean_user_name = ''.join(c for c in unicodedata.normalize('NFD', raw_name) if unicodedata.category(c) != 'Mn')
+    clean_user_name = re.sub(r'[^\w]', '', clean_user_name).lower()[:10]
+    safe_name = re.sub(r'[^\w\-]', '_', raw_name).lower()
+    
+    if engine == 'postgres':
+        import urllib.parse
+        base_dsn = os.environ.get('DEFAULT_USER_DB_DNS')
+        if not base_dsn:
+            return jsonify({'error': 'DEFAULT_USER_DB_DNS not set'}), 500
+            
+        parsed = urllib.parse.urlparse(base_dsn)
+        master_dsn = parsed._replace(path='/postgres').geturl()
+        safe_name_pg = f"tenant_{org_id.replace('-', '')}_{os.urandom(2).hex()}_{clean_user_name}"
+        
+        try:
+            import psycopg
+            conn = psycopg.connect(master_dsn, autocommit=True)
+            conn.execute(f'CREATE DATABASE "{safe_name_pg}"')
+            conn.close()
+        except Exception as e:
+            return jsonify({'error': f'Postgres CREATE DATABASE failed: {str(e)}'}), 500
+            
+        final_dsn = parsed._replace(path='/' + safe_name_pg).geturl()
+        
+        db_path = final_dsn
+        db_name_display = raw_name
+    else:
+        # SQLite
+        if not safe_name.endswith('.db'):
+            safe_name += '.db'
+        db_path = os.path.join(db_module.DB_DIRECTORY, safe_name)
+        if os.path.exists(db_path):
+            return jsonify({'error': 'A database with this name already exists'}), 409
+        db_name_display = safe_name
+
+    db_module.set_current_db(db_path, engine)
+    
     try:
         init_db()
         migrate_db()
-        # Link to organization
-        auth_db.add_org_database(org_id, db_path, raw_name, request.current_user['id'])
+
+        auth_db.add_org_database(
+            org_id, 
+            db_path, 
+            raw_name, 
+            request.current_user['id'], 
+            engine=engine, 
+            dsn=db_path if engine == 'postgres' else ''
+        )
     except Exception as e:
-        db_module.set_current_db(db_module.DB_PATH)
+        import traceback
+        traceback.print_exc()
+        db_module.set_current_db(db_module.get_current_db_path(), db_module.get_current_db_engine())
         return jsonify({'error': str(e)}), 500
-    return jsonify({'status': 'created', 'path': db_path, 'name': safe_name}), 201
+        
+    return jsonify({'status': 'created', 'path': db_path, 'name': db_name_display}), 201
 
 
 @app.route('/api/databases/current', methods=['GET'])
 def get_current_database():
     path = db_module.get_current_db_path()
+    engine = db_module.get_current_db_engine()
     return jsonify({
         'path': path,
-        'name': os.path.basename(path),
+        'name': os.path.basename(path) if engine == 'sqlite' else path.split('/')[-1],
         'is_current': True,
+        'engine': engine
     })
 
 
 @app.route('/api/databases/select', methods=['POST'])
+@require_auth
 def select_database():
     """Switch the active database for all subsequent requests."""
+    org_id = request.current_org_id
+    if not org_id: return jsonify({'error': 'Org missing'}), 403
+
     data = request.json or {}
     path = (data.get('path') or '').strip()
     if not path:
         return jsonify({'error': 'path is required'}), 400
         
-    # Resolve relative paths against DB_DIRECTORY
-    if not os.path.isabs(path):
-        path = os.path.join(db_module.DB_DIRECTORY, path)
-        
-    # Security: must be inside DB_DIRECTORY
-    abs_path = os.path.abspath(path)
-    if not abs_path.startswith(os.path.abspath(db_module.DB_DIRECTORY)):
-        return jsonify({'error': 'Invalid path'}), 403
-    if not os.path.exists(abs_path):
-        return jsonify({'error': 'File not found'}), 404
-    db_module.set_current_db(abs_path)
+    # Verify permission and retrieve DB config
+    org_dbs = auth_db.get_org_databases(org_id)
+    target_db = None
+    for d in org_dbs:
+        resolved = d['db_path']
+        if d.get('engine', 'sqlite') == 'sqlite' and not os.path.isabs(resolved):
+            resolved = os.path.join(db_module.DB_DIRECTORY, resolved)
+        if resolved == path or d['db_path'] == path:
+            target_db = d
+            break
+    
+    if not target_db:
+         return jsonify({'error': 'Access denied or Database not found'}), 403
+
+    engine = target_db.get('engine', 'sqlite')
+    
+    if engine == 'sqlite':
+        if not os.path.isabs(path):
+            path = os.path.join(db_module.DB_DIRECTORY, path)
+        abs_path = os.path.abspath(path)
+        if not abs_path.startswith(os.path.abspath(db_module.DB_DIRECTORY)):
+            return jsonify({'error': 'Invalid path'}), 403
+        if not os.path.exists(abs_path):
+            return jsonify({'error': 'File not found'}), 404
+        db_path_resolved = abs_path
+    else:
+        db_path_resolved = path
+
+    db_module.set_current_db(db_path_resolved, engine)
     # Ensure schema is up-to-date on this DB
     try:
         migrate_db()
     except Exception:
         pass
-    return jsonify({'status': 'ok', 'name': os.path.basename(abs_path), 'path': abs_path})
+    return jsonify({'status': 'ok', 'name': os.path.basename(db_path_resolved) if engine == 'sqlite' else db_path_resolved.split('/')[-1], 'path': db_path_resolved})
 
 
 # ─── DB CONFIGS (user-registered connection configs, cloud-saved) ──────────────
@@ -1094,9 +1146,11 @@ def get_db_configs():
     for d in configs:
         d['storageType'] = 'cloud'
         if d.get('db_path'):
-            summary = _db_summary(d['id'],d['db_path'])
+            engine = d.get('engine', 'sqlite')
+            summary = _db_summary(d['id'], d['db_path'], engine=engine)
             d.update(summary)
             d['path'] = d.get('db_path')
+            d['engine'] = engine
         results.append(d)
     return jsonify(results)
 
@@ -1109,8 +1163,14 @@ def create_db_config():
     user_id = request.current_user['id']
     
     db_path = data.get('db_path', '').strip()
-    if db_path and not os.path.isabs(db_path):
+    if db_path and not os.path.isabs(db_path) and not db_path.startswith(('postgres', 'mysql', 'http')):
         db_path = os.path.join(db_module.DB_DIRECTORY, db_path)
+
+    engine = data.get('engine', 'sqlite')
+    if db_path.startswith('postgres'):
+        engine = 'postgres'
+    if data.get('type') == 'self-hosted':
+        engine = 'api'
 
     entry = auth_db.add_org_database(
         org_id, 
@@ -1120,7 +1180,9 @@ def create_db_config():
         type=data.get('type', 'api'),
         base_url=data.get('base_url', ''), 
         filename=data.get('filename', ''),
-        user_id=user_id
+        user_id=user_id,
+        engine=engine,
+        dsn=db_path if engine == 'postgres' else ''
     )
     return jsonify({'id': entry['id'], 'status': 'created'}), 201
 
@@ -1181,10 +1243,7 @@ def save_ai_config():
             # Don't overwrite the key if the user sent back the masked value
             if key == 'ai_api_key' and '••••' in str(value):
                 continue
-            conn.execute(
-                "INSERT OR REPLACE INTO system_config (key, value, updated_at) VALUES (?, ?, datetime('now'))",
-                (key, str(value))
-            )
+            db_adapter.upsert_config(conn, 'system_config', key, str(value))
     conn.commit()
     conn.close()
     return jsonify({'status': 'ok'})
@@ -1261,11 +1320,19 @@ def _execute_tool(tool_name, args, conn):
     elif tool_name == "get_financial_summary":
         try:
             ym = datetime.now().strftime('%Y-%m')
-            balance  = conn.execute("SELECT COALESCE(SUM(balance),0) FROM accounts").fetchone()[0]
+            
+            def val(r, key='val'):
+                return r[key] if type(r) is dict else r[0]
+
+            balance  = val(conn.execute("SELECT COALESCE(SUM(balance),0) as val FROM accounts").fetchone())
             accounts = [dict(r) for r in conn.execute("SELECT id,name,type,balance,currency,institution FROM accounts ORDER BY balance DESC").fetchall()]
-            income   = conn.execute("SELECT COALESCE(SUM(amount),0) FROM transactions WHERE type='income'  AND date LIKE ?", (ym+'%',)).fetchone()[0]
-            expense  = conn.execute("SELECT COALESCE(SUM(amount),0) FROM transactions WHERE type='expense' AND date LIKE ?", (ym+'%',)).fetchone()[0]
-            total_tx = conn.execute("SELECT COUNT(*) FROM transactions").fetchone()[0]
+            
+            start_date = f"{datetime.now().year}-{datetime.now().month:02d}-01"
+            end_date = f"{datetime.now().year + 1}-01-01" if datetime.now().month == 12 else f"{datetime.now().year}-{datetime.now().month + 1:02d}-01"
+            
+            income   = val(conn.execute("SELECT COALESCE(SUM(amount),0) as val FROM transactions WHERE type='income'  AND date >= ? AND date < ?", (start_date, end_date)).fetchone())
+            expense  = val(conn.execute("SELECT COALESCE(SUM(amount),0) as val FROM transactions WHERE type='expense' AND date >= ? AND date < ?", (start_date, end_date)).fetchone())
+            total_tx = val(conn.execute("SELECT COUNT(*) as val FROM transactions").fetchone())
             top_cats = [dict(r) for r in conn.execute(
                 "SELECT category, SUM(amount) AS total FROM transactions WHERE type='expense' GROUP BY category ORDER BY total DESC LIMIT 5"
             ).fetchall()]
@@ -1437,13 +1504,7 @@ def _sync_tags(conn, kind, owner_id, tag_names):
 @app.route('/api/categories', methods=['GET'])
 def get_categories():
     conn = get_db_connection()
-    # Safe migration — add color/icon if they don't exist
-    for col, default in [('color',"'#6366f1'"), ('icon',"'tag'")]:
-        try:
-            conn.execute(f"ALTER TABLE categories ADD COLUMN {col} TEXT DEFAULT {default}")
-            conn.commit()
-        except Exception:
-            pass
+
     rows = conn.execute('''
         SELECT c.*, 
                COUNT(t.id) as usage_count,
@@ -2174,22 +2235,7 @@ def _get_market_db():
     if _MARKET_DB_TYPE.lower() == 'sqlite':
         os.makedirs(os.path.dirname(_MARKET_DB_PATH), exist_ok=True)
         
-    conn = db_adapter.get_connection(_MARKET_DB_TYPE, _MARKET_DB_DSN)
-    
-    conn.execute('''CREATE TABLE IF NOT EXISTS market_snapshots (
-        id          INTEGER PRIMARY KEY AUTOINCREMENT,
-        queried_at  TEXT    NOT NULL DEFAULT (datetime('now')),
-        source      TEXT    NOT NULL,
-        indicator   TEXT    NOT NULL,
-        value       REAL,
-        changed     INTEGER DEFAULT 0,
-        prev_value  REAL,
-        metadata    TEXT
-    )''')
-    conn.execute('''CREATE INDEX IF NOT EXISTS idx_ms_indicator ON market_snapshots(indicator)''')
-    conn.execute('''CREATE INDEX IF NOT EXISTS idx_ms_queried   ON market_snapshots(queried_at)''')
-    conn.commit()
-    return conn
+    return db_adapter.get_connection(_MARKET_DB_TYPE, _MARKET_DB_DSN)
 
 
 def _log_market_data(result: dict):
@@ -3406,7 +3452,7 @@ def global_search():
             WHERE t.description LIKE ?
                OR t.category    LIKE ?
                OR CAST(t.amount AS TEXT) LIKE ?
-               OR t.date LIKE ?
+               OR CAST(t.date AS TEXT) LIKE ?
                OR e.name LIKE ?
             ORDER BY t.date DESC LIMIT 15
             ''', (like, like, like, like, like)
@@ -3536,14 +3582,7 @@ def recurring_pre_transactions(id):
 @app.route('/api/patrimony', methods=['GET'])
 def get_patrimony():
     conn = get_db_connection()
-    # Add columns if they don't exist yet (safe migration)
-    for col, typedef in [('purchase_price', 'INTEGER DEFAULT 0'),
-                         ('depreciation_rate', 'REAL DEFAULT 0')]:
-        try:
-            conn.execute(f'ALTER TABLE patrimony_items ADD COLUMN {col} {typedef}')
-            conn.commit()
-        except Exception:
-            pass
+
 
     rows = conn.execute('SELECT * FROM patrimony_items ORDER BY type, value DESC').fetchall()
     conn.close()
@@ -3592,13 +3631,7 @@ def get_patrimony():
 def create_patrimony():
     d = request.json
     conn = get_db_connection()
-    for col, typedef in [('purchase_price', 'INTEGER DEFAULT 0'),
-                         ('depreciation_rate', 'REAL DEFAULT 0')]:
-        try:
-            conn.execute(f'ALTER TABLE patrimony_items ADD COLUMN {col} {typedef}')
-            conn.commit()
-        except Exception:
-            pass
+
     conn.execute(
         'INSERT INTO patrimony_items (name, type, category, value, purchase_price, depreciation_rate, acquisition_date, notes) VALUES (?,?,?,?,?,?,?,?)',
         (d['name'], d.get('type','asset'), d.get('category'), int(round(float(d.get('value', 0)))),
@@ -3730,13 +3763,7 @@ def get_forecast():
 @app.route('/api/pre-transactions', methods=['GET'])
 def get_pre_transactions():
     conn = get_db_connection()
-    # Ensure new columns exist (safe migration)
-    for col, ctype in [('recurring_id','INTEGER'), ('transaction_id','INTEGER')]:
-        try:
-            conn.execute(f'ALTER TABLE pre_transactions ADD COLUMN {col} {ctype}')
-            conn.commit()
-        except Exception:
-            pass
+
     rows = conn.execute('''
         SELECT pt.*,
                a.name as account_name, 
@@ -3858,7 +3885,7 @@ def update_config():
     d = request.json
     conn = get_db_connection()
     for k, v in d.items():
-        conn.execute('INSERT OR REPLACE INTO system_config (key, value, updated_at) VALUES (?,?, datetime("now"))', (k, str(v)))
+        db_adapter.upsert_config(conn, 'system_config', k, str(v))
     conn.commit()
     conn.close()
     return jsonify({'status':'success'})
@@ -4065,51 +4092,7 @@ def get_unified_flow():
 # ─── AUTOMATION RULES ────────────────────────────────────────────────────────
 
 def _ensure_automation_tables(conn):
-    """Create automation tables if they don't exist yet (idempotent)."""
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS automation_rules (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            name         TEXT NOT NULL,
-            match_text   TEXT NOT NULL,
-            match_type   TEXT NOT NULL DEFAULT 'contains',
-            priority     INTEGER NOT NULL DEFAULT 100,
-            active       INTEGER NOT NULL DEFAULT 1,
-            trigger_mode TEXT NOT NULL DEFAULT 'all',
-            apply_category  TEXT,
-            apply_tags      TEXT,
-            apply_entity_id INTEGER,
-            apply_flags     INTEGER DEFAULT 0,
-            apply_type      TEXT,
-            apply_notes     TEXT,
-            created_at   TEXT DEFAULT (datetime('now')),
-            updated_at   TEXT DEFAULT (datetime('now'))
-        )
-    ''')
-    conn.execute('''
-        CREATE TABLE IF NOT EXISTS automation_logs (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
-            transaction_id  INTEGER NOT NULL,
-            rule_id         INTEGER NOT NULL,
-            applied_at      TEXT DEFAULT (datetime('now')),
-            FOREIGN KEY (transaction_id) REFERENCES transactions(id) ON DELETE CASCADE,
-            FOREIGN KEY (rule_id)        REFERENCES automation_rules(id) ON DELETE CASCADE
-        )
-    ''')
-    try:
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_autolog_txn ON automation_logs(transaction_id)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_autolog_rule ON automation_logs(rule_id)")
-    except Exception:
-        pass
-    # Safe column migrations for older DBs
-    for col, coltype in [
-        ('apply_account_ids',            'TEXT'),
-        ('apply_source_account_id',      'INTEGER'),
-        ('apply_destination_account_id', 'INTEGER'),
-    ]:
-        try:
-            conn.execute(f"ALTER TABLE automation_rules ADD COLUMN {col} {coltype}")
-        except Exception:
-            pass
+    pass
 
 
 def _matches_rule(description, rule):
