@@ -55,24 +55,8 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(['rule_id'], ['automation_rules.id'], ondelete='CASCADE'),
         sa.PrimaryKeyConstraint('id')
     )
-    # Add file_imports
-    op.create_table(
-        'file_imports',
-        sa.Column('id', sa.Integer(), autoincrement=True, nullable=False),
-        sa.Column('filename', sa.String(), nullable=False),
-        sa.Column('md5', sa.String(), nullable=False),
-        sa.Column('bank', sa.String(), nullable=False),
-        sa.Column('account_id', sa.Integer(), nullable=True),
-        sa.Column('imported', sa.Integer(), server_default='0', nullable=True),
-        sa.Column('duplicates', sa.Integer(), server_default='0', nullable=True),
-        sa.Column('invalid', sa.Integer(), server_default='0', nullable=True),
-        sa.Column('processed_at', sa.String(), server_default=sa.text('CURRENT_TIMESTAMP')),
-        sa.PrimaryKeyConstraint('id'),
-        sa.UniqueConstraint('md5')
-    )
-
+    # Add file_imports removed to be placed in next migration properly
 def downgrade() -> None:
-    op.drop_table('file_imports')
     op.drop_table('automation_logs')
     op.drop_table('automation_rules')
     op.drop_column('patrimony_items', 'depreciation_rate')

@@ -229,10 +229,10 @@ def get_audit_stats():
         "SELECT table_name, COUNT(*) as cnt FROM audit_log WHERE table_name IS NOT NULL GROUP BY table_name ORDER BY cnt DESC LIMIT 10"
     ).fetchall()
     rows_by_user = conn.execute(
-        "SELECT user_email, user_name, COUNT(*) as cnt FROM audit_log WHERE user_id != '' GROUP BY user_id ORDER BY cnt DESC LIMIT 10"
+        "SELECT user_email, user_name, COUNT(*) as cnt FROM audit_log WHERE user_id != '' GROUP BY user_id, user_email, user_name ORDER BY cnt DESC LIMIT 10"
     ).fetchall()
     recent_users = conn.execute(
-        "SELECT DISTINCT user_email, user_name, MAX(occurred_at) as last_at FROM audit_log GROUP BY user_id ORDER BY last_at DESC LIMIT 5"
+        "SELECT DISTINCT user_email, user_name, MAX(occurred_at) as last_at FROM audit_log GROUP BY user_id, user_email, user_name ORDER BY last_at DESC LIMIT 5"
     ).fetchall()
     total_logs    = conn.execute("SELECT COUNT(*) FROM audit_log").fetchone()[0]
     total_changes = conn.execute("SELECT COUNT(*) FROM change_history").fetchone()[0]
@@ -1862,7 +1862,7 @@ def get_transactions():
         query += ' AND (t.conciliation_status & 1) = 0'
     if flags_q:
         query += f' AND (t.flags & {int(flags_q)}) = {int(flags_q)}'
-    query += ' GROUP BY t.id ORDER BY t.date DESC, t.id desc'
+    query += ' GROUP BY t.id, a.name, e.display_name, e.name, ref.date, ref.description, ref.type ORDER BY t.date DESC, t.id desc'
     rows = conn.execute(query, params).fetchall()
     rules, enabled = _get_redaction_context(conn)
     conn.close()
@@ -2645,7 +2645,7 @@ def get_entities():
         FROM entities e
         LEFT JOIN transactions t ON t.entity_id = e.id
         GROUP BY e.id
-        ORDER BY name
+        ORDER BY e.name
     ''').fetchall()
     conn.close()
     return jsonify([dict(r) for r in rows])
@@ -2719,7 +2719,7 @@ def entity_transactions(id):
                 LEFT JOIN tags tg ON tg.id=tt.tag_id
                 WHERE t.entity_id=? 
                   AND (e.exclude_from_reports IS NULL OR e.exclude_from_reports = 0)
-                GROUP BY t.id ORDER BY t.date DESC'''
+                GROUP BY t.id, a.name, e.display_name, e.name ORDER BY t.date DESC'''
     rows = conn.execute(query, (id,)).fetchall()
     rules, enabled = _get_redaction_context(conn)
     conn.close()

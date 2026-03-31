@@ -51,6 +51,21 @@ def translate_sqlite_to_postgres(sql: str) -> str:
     sql_pg = re.sub(r"\bdatetime\('now',\s*'utc'\)", "CURRENT_TIMESTAMP AT TIME ZONE 'UTC'", sql_pg, flags=re.IGNORECASE)
     sql_pg = re.sub(r"\bdatetime\('now'\)", "CURRENT_TIMESTAMP", sql_pg, flags=re.IGNORECASE)
     
+    # GROUP_CONCAT to STRING_AGG (specific to our queries)
+    sql_pg = re.sub(r'GROUP_CONCAT\(([^,]+?)\)', r"STRING_AGG(\1, ',')", sql_pg, flags=re.IGNORECASE)
+    
+    # Date arithmetic and formatting
+    sql_pg = re.sub(r"date\('now',\s*'([^']+)'\)", r"(CURRENT_DATE + INTERVAL '\1')", sql_pg, flags=re.IGNORECASE)
+    sql_pg = re.sub(r"date\('now'\)", "CURRENT_DATE", sql_pg, flags=re.IGNORECASE)
+    
+    # strftime exact replacements for the dashboard
+    sql_pg = sql_pg.replace("strftime('%Y-%m', date)", "TO_CHAR(CAST(date AS date), 'YYYY-MM')")
+    sql_pg = sql_pg.replace("strftime('%w', date)", "EXTRACT(DOW FROM CAST(date AS date))")
+    sql_pg = sql_pg.replace("strftime('%m', date)", "TO_CHAR(CAST(date AS date), 'MM')")
+    sql_pg = sql_pg.replace("strftime('%Y', date)", "TO_CHAR(CAST(date AS date), 'YYYY')")
+    sql_pg = sql_pg.replace("strftime('%Y',date)", "TO_CHAR(CAST(date AS date), 'YYYY')")
+    sql_pg = sql_pg.replace("strftime('%Y','now')", "TO_CHAR(CURRENT_DATE, 'YYYY')")
+    
     # Types
     # sqlite TEXT is fine in pg. Wait, sqlite also has REAL, INT.
     
@@ -83,8 +98,11 @@ class PostgresCursorWrapper:
             sql_pg += " RETURNING id"
             self.cur.execute(sql_pg, params)
             row = self.cur.fetchone()
-            if row and 'id' in row:
-                self._lastrowid_val = row['id']
+            if row:
+                if hasattr(row, 'values'):
+                    self._lastrowid_val = list(row.values())[0]
+                else:
+                    self._lastrowid_val = row[0] if type(row) is tuple else getattr(row, 'id', getattr(row, 0, None))
             # We don't want to leave the row in the cursor if the caller expects no rows
             return self
 
